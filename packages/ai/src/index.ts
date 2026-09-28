@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import Anthropic from '@anthropic-ai/sdk';
 
 export type AgentProposal = {
@@ -20,5 +21,5 @@ export async function askClaude(prompt: string) {
     max_tokens: 1024,
     messages: [{ role: 'user', content: prompt }]
   });
-  return response.content.filter((block) => block.type === 'text').map((block) => block.text).join('\n');
+  return response.content.filter((block) => block.type === 'text').map((block) => block.text).join('\\n');
 }
