@@ -1,0 +1,1 @@
+{"name":"dropshipping-ai","private":true,"version":"0.1.0","packageManager":"pnpm@10.0.0","scripts":{"dev":"pnpm --filter @dropshipping/api dev","build":"pnpm -r build","test":"pnpm -r test"},"engines":{"node":">=20"}}
