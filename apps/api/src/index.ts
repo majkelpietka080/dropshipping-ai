@@ -193,6 +193,36 @@ app.post('/agent/products/proposals/:id/reject', async (request, reply) => {
   };
 });
 
+app.get('/suppliers/search', async (request) => {
+  const { createSupplierManager } = await import('./suppliers.js');
+  const query = request.query as {
+    query?: string;
+    category?: string;
+    maxPrice?: string;
+    currency?: string;
+    shippingCountry?: string;
+    limit?: string;
+  };
+
+  const manager = createSupplierManager();
+
+  const products = await manager.searchProducts({
+    query: query.query,
+    category: query.category,
+    maxPrice: query.maxPrice ? Number(query.maxPrice) : undefined,
+    currency: query.currency,
+    shippingCountry: query.shippingCountry,
+    limit: query.limit ? Number(query.limit) : undefined
+  });
+
+  return {
+    ok: true,
+    suppliers: manager.listSuppliers(),
+    count: products.length,
+    products
+  };
+});
+
 const port = Number(process.env.APP_PORT ?? 3000);
 const host = process.env.APP_HOST ?? '0.0.0.0';
 app.get('/shopify/test', async () => {
@@ -234,5 +264,39 @@ app.get('/shopify/test', async () => {
     shop: data.shop
   };
 });
-await app.listen({ port, host });
 
+
+app.get('/agent/products/evaluate', async (request) => {
+  const { createSupplierManager } = await import('./suppliers.js');
+  const { evaluateProduct } = await import('@dropshipping/product-scout');
+
+  const query = request.query as {
+    query?: string;
+    category?: string;
+    maxPrice?: string;
+    shippingCountry?: string;
+    limit?: string;
+  };
+
+  const manager = createSupplierManager();
+
+  const products = await manager.searchProducts({
+    query: query.query,
+    category: query.category,
+    maxPrice: query.maxPrice ? Number(query.maxPrice) : undefined,
+    shippingCountry: query.shippingCountry,
+    limit: query.limit ? Number(query.limit) : undefined
+  });
+
+  const evaluations = products.map((product) =>
+    evaluateProduct(product)
+  );
+
+  return {
+    ok: true,
+    count: evaluations.length,
+    evaluations
+  };
+});
+
+await app.listen({ port, host });

@@ -54,6 +54,45 @@ async function getAccessToken(config: ShopifyConfig): Promise<string> {
   return cachedToken!;
 }
 
+export async function createShopifyProduct(
+  config: ShopifyConfig,
+  input: {
+    title: string;
+    description?: string;
+    vendor?: string;
+    productType?: string;
+    price?: number;
+  }
+) {
+  const client = createShopifyClient(config);
+
+  const mutation = `
+    mutation productCreate($product: ProductCreateInput!) {
+      productCreate(product: $product) {
+        product {
+          id
+          title
+          status
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
+  return client.query(mutation, {
+    product: {
+      title: input.title,
+      descriptionHtml: input.description ?? '',
+      vendor: input.vendor ?? 'GIOVETTA LIVING',
+      productType: input.productType ?? '',
+      status: 'DRAFT'
+    }
+  });
+}
+
 export function createShopifyClient(config: ShopifyConfig) {
   const domain = config.shopDomain
     .replace(/^https?:\/\//, '')
