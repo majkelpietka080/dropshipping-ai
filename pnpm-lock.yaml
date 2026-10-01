@@ -19,6 +19,9 @@ importers:
       '@dropshipping/shopify':
         specifier: workspace:^
         version: link:../../packages/shopify
+      '@dropshipping/stores':
+        specifier: workspace:*
+        version: link:../../packages/stores
       '@dropshipping/suppliers':
         specifier: workspace:^
         version: link:../../packages/suppliers
