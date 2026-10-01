@@ -2,20 +2,20 @@
 
 client_id = "23a2574bc0d143ea80b3b7b148cc1689"
 name = "Giovetta Living AI"
-application_url = "https://example.com"
+application_url = "https://big-coins-joke.loca.lt"
 embedded = true
+
+[build]
+automatically_update_urls_on_dev = true
+
+[webhooks]
+api_version = "2026-07"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_inventory,read_orders,read_products"
+scopes = "read_inventory,read_orders,read_products,write_products"
 optional_scopes = [ ]
 use_legacy_install_flow = false
 
 [auth]
 redirect_urls = [ ]
-
-[webhooks]
-api_version = "2026-07"
-
-[build]
-automatically_update_urls_on_dev = true

@@ -158,12 +158,29 @@ app.post('/agent/products/proposals/:id/approve', async (request, reply) => {
     });
   }
 
+  const { createShopifyProduct } = await import("@dropshipping/shopify");
+
+  const result = await createShopifyProduct(
+    {
+      shopDomain: process.env.SHOPIFY_SHOP_DOMAIN ?? "",
+      clientId: process.env.SHOPIFY_CLIENT_ID ?? "",
+      clientSecret: process.env.SHOPIFY_CLIENT_SECRET ?? ""
+    },
+    {
+      title: proposal.title,
+      description: `Produkt wybrany przez Product Scout. Powód: ${proposal.reason}`,
+      vendor: "GIOVETTA LIVING",
+      productType: proposal.category
+    }
+  );
+
   proposal.status = 'approved';
 
   return {
     ok: true,
-    message: 'Propozycja zatwierdzona. Wykonanie akcji Shopify będzie dodane w kolejnym kroku.',
-    proposal
+    message: 'Propozycja zatwierdzona i utworzona w Shopify jako DRAFT.',
+    proposal,
+    shopify: result
   };
 });
 
@@ -222,6 +239,33 @@ app.get('/suppliers/search', async (request) => {
     products
   };
 });
+
+app.get("/", async (_request, reply) => {
+  return reply.type("text/html").send("<h1>Giovetta Living AI</h1><p>API działa poprawnie.</p>");
+});
+
+app.get("/shopify/scopes", async () => {
+  const { createShopifyClient } = await import("@dropshipping/shopify");
+
+  const client = createShopifyClient({
+    shopDomain: process.env.SHOPIFY_SHOP_DOMAIN ?? "",
+    clientId: process.env.SHOPIFY_CLIENT_ID ?? "",
+    clientSecret: process.env.SHOPIFY_CLIENT_SECRET ?? ""
+  });
+
+  return client.query(`
+    query {
+      currentAppInstallation {
+        accessScopes {
+          handle
+          description
+        }
+      }
+    }
+  `);
+});
+
+app.get("/store/config", async () => { const { storeConfig } = await import("../../../stores/giovetta-living/store.config.js"); return { ok: true, store: storeConfig }; });
 
 const port = Number(process.env.APP_PORT ?? 3000);
 const host = process.env.APP_HOST ?? '0.0.0.0';
