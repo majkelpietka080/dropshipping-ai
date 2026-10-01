@@ -37,3 +37,26 @@ export function createStoreConfig(input: Partial<StoreConfig> & Pick<StoreConfig
     ...input
   };
 }
+
+
+export type StoreProposal = {
+  id: string;
+  name: string;
+  tagline: string;
+  niche: string;
+  productCategories: string[];
+  brand: NonNullable<StoreConfig["brand"]>;
+  aiInfluencer: NonNullable<StoreConfig["aiInfluencer"]>;
+  reason: string;
+  status: "pending" | "approved" | "rejected";
+  createdAt: string;
+};
+
+export function createStoreProposal(input: Omit<StoreProposal, "id" | "status" | "createdAt">): StoreProposal {
+  return {
+    ...input,
+    id: crypto.randomUUID(),
+    status: "pending",
+    createdAt: new Date().toISOString()
+  };
+}

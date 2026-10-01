@@ -85,6 +85,91 @@ app.get('/shopify/products', async () => {
 });
 
 
+const storeProposals = new Map<string, {
+  id: string;
+  name: string;
+  tagline: string;
+  niche: string;
+  productCategories: string[];
+  brand: { primaryColor?: string; secondaryColor?: string; style?: string };
+  aiInfluencer: { enabled: boolean; name?: string; ageRange?: string; personality?: string[] };
+  reason: string;
+  status: "pending" | "approved" | "rejected";
+  createdAt: string;
+}>();
+
+app.post("/agent/stores/propose", async (request, reply) => {
+  const body = request.body as {
+    name: string;
+    tagline: string;
+    niche: string;
+    productCategories: string[];
+    brand: { primaryColor?: string; secondaryColor?: string; style?: string };
+    aiInfluencer: { enabled: boolean; name?: string; ageRange?: string; personality?: string[] };
+    reason: string;
+  };
+
+  const proposal = {
+    id: crypto.randomUUID(),
+    ...body,
+    status: "pending" as const,
+    createdAt: new Date().toISOString()
+  };
+
+  storeProposals.set(proposal.id, proposal);
+
+  return reply.code(201).send({ ok: true, proposal });
+});
+
+app.get("/agent/stores/proposals", async () => {
+  return {
+    ok: true,
+    proposals: Array.from(storeProposals.values())
+  };
+});
+
+app.post("/agent/stores/proposals/:id/approve", async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const proposal = storeProposals.get(id);
+
+  if (!proposal) {
+    return reply.code(404).send({ ok: false, error: "Propozycja sklepu nie istnieje" });
+  }
+
+  if (proposal.status !== "pending") {
+    return reply.code(409).send({ ok: false, error: `Propozycja ma już status: ${proposal.status}` });
+  }
+
+  proposal.status = "approved";
+
+  return {
+    ok: true,
+    message: "Propozycja sklepu zatwierdzona.",
+    proposal
+  };
+});
+
+app.post("/agent/stores/proposals/:id/reject", async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const proposal = storeProposals.get(id);
+
+  if (!proposal) {
+    return reply.code(404).send({ ok: false, error: "Propozycja sklepu nie istnieje" });
+  }
+
+  if (proposal.status !== "pending") {
+    return reply.code(409).send({ ok: false, error: `Propozycja ma już status: ${proposal.status}` });
+  }
+
+  proposal.status = "rejected";
+
+  return {
+    ok: true,
+    message: "Propozycja sklepu odrzucona.",
+    proposal
+  };
+});
+
 const productProposals = new Map<string, {
   id: string;
   title: string;
