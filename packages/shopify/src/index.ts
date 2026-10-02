@@ -73,6 +73,12 @@ export async function createShopifyProduct(
           id
           title
           status
+          variants(first: 1) {
+            nodes {
+              id
+              price
+            }
+          }
         }
         userErrors {
           field
@@ -82,7 +88,17 @@ export async function createShopifyProduct(
     }
   `;
 
-  return client.query(mutation, {
+  const result = await client.query<{
+    productCreate: {
+      product: {
+        id: string;
+        title: string;
+        status: string;
+        variants: { nodes: Array<{ id: string; price: string }> };
+      } | null;
+      userErrors: Array<{ field?: string[]; message: string }>;
+    };
+  }>(mutation, {
     product: {
       title: input.title,
       descriptionHtml: input.description ?? '',
@@ -91,6 +107,48 @@ export async function createShopifyProduct(
       status: 'DRAFT'
     }
   });
+
+  if (result.productCreate.userErrors.length) {
+    throw new Error(`Shopify productCreate error: ${JSON.stringify(result.productCreate.userErrors)}`);
+  }
+
+  const product = result.productCreate.product;
+
+  if (input.price !== undefined && product?.id && product.variants.nodes[0]?.id) {
+    const priceResult = await client.query<{
+      productVariantsBulkUpdate: {
+        productVariants: Array<{ id: string; price: string }>;
+        userErrors: Array<{ field?: string[]; message: string }>;
+      };
+    }>(`
+      mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+        productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+          productVariants {
+            id
+            price
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `, {
+      productId: product.id,
+      variants: [{ id: product.variants.nodes[0].id, price: input.price }]
+    });
+
+    if (priceResult.productVariantsBulkUpdate.userErrors.length) {
+      throw new Error(`Shopify variant price error: ${JSON.stringify(priceResult.productVariantsBulkUpdate.userErrors)}`);
+    }
+
+    return {
+      ...result.productCreate,
+      priceUpdate: priceResult.productVariantsBulkUpdate
+    };
+  }
+
+  return result.productCreate;
 }
 
 export function createShopifyClient(config: ShopifyConfig) {

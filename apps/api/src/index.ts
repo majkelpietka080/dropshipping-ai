@@ -11,6 +11,10 @@ dotenv.config({
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { askClaude } from '@dropshipping/ai';
+import { createStoreConfig, type StoreProposal } from '@dropshipping/stores';
+import { loadJsonArray, saveJsonArray } from './storage.js';
+import { findAvailableStoreSlug, loadStoreConfig, writeStoreConfigFiles } from './store-files.js';
+import { getShopifyConfig } from './shopify-config.js';
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
@@ -27,19 +31,13 @@ app.post('/ai/test', async (request, reply) => {
 app.get('/shopify/products', async () => {
   const { createShopifyClient } = await import('@dropshipping/shopify');
 
-  const shop = process.env.SHOPIFY_SHOP;
-  const clientId = process.env.SHOPIFY_CLIENT_ID;
-  const clientSecret = process.env.SHOPIFY_CLIENT_SECRET;
+  const config = getShopifyConfig();
 
-  if (!shop || !clientId || !clientSecret) {
+  if (!config) {
     return { ok: false, error: 'Brakuje konfiguracji Shopify w .env' };
   }
 
-  const client = createShopifyClient({
-    shopDomain: shop,
-    clientId,
-    clientSecret
-  });
+  const client = createShopifyClient(config);
 
   const data = await client.query<{
     products: {
@@ -85,18 +83,9 @@ app.get('/shopify/products', async () => {
 });
 
 
-const storeProposals = new Map<string, {
-  id: string;
-  name: string;
-  tagline: string;
-  niche: string;
-  productCategories: string[];
-  brand: { primaryColor?: string; secondaryColor?: string; style?: string };
-  aiInfluencer: { enabled: boolean; name?: string; ageRange?: string; personality?: string[] };
-  reason: string;
-  status: "pending" | "approved" | "rejected";
-  createdAt: string;
-}>();
+const storeProposals = new Map<string, StoreProposal>(
+  (await loadJsonArray<StoreProposal>('store-proposals.json')).map((item) => [item.id, item])
+);
 
 app.post("/agent/stores/propose", async (request, reply) => {
   const body = request.body as {
@@ -117,6 +106,7 @@ app.post("/agent/stores/propose", async (request, reply) => {
   };
 
   storeProposals.set(proposal.id, proposal);
+  await saveJsonArray('store-proposals.json', Array.from(storeProposals.values()));
 
   return reply.code(201).send({ ok: true, proposal });
 });
@@ -140,58 +130,26 @@ app.post("/agent/stores/proposals/:id/approve", async (request, reply) => {
     return reply.code(409).send({ ok: false, error: `Propozycja ma już status: ${proposal.status}` });
   }
 
-  const { mkdir, writeFile, access } = await import("node:fs/promises");
-  const storesRoot = resolve(__dirname, "../../../stores");
-
-  const slug = proposal.name
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "new-store";
-
-  let storeSlug = slug;
-  let suffix = 2;
-
-  while (true) {
-    try {
-      await access(resolve(storesRoot, storeSlug));
-      storeSlug = `${slug}-${suffix++}`;
-    } catch {
-      break;
-    }
-  }
-
-  const storeDir = resolve(storesRoot, storeSlug);
-  const configPath = resolve(storeDir, "store.config.ts");
-
-  const config = `export const storeConfig = ${JSON.stringify({
+  const storeSlug = await findAvailableStoreSlug(proposal.name);
+  const config = createStoreConfig({
     id: proposal.id,
     name: proposal.name,
     tagline: proposal.tagline,
-    market: "EU",
-    currency: "EUR",
-    language: "pl",
-    supplierStrategy: "multi-supplier",
-    targetMargin: 0.55,
-    maxDeliveryDays: 10,
-    approvalRequired: true,
     niche: proposal.niche,
     productCategories: proposal.productCategories,
     brand: proposal.brand,
     aiInfluencer: proposal.aiInfluencer
-  }, null, 2)} as const;
-`;
+  });
 
-  await mkdir(storeDir, { recursive: true });
-  await writeFile(configPath, config, "utf8");
+  await writeStoreConfigFiles(storeSlug, config);
   proposal.status = "approved";
+  await saveJsonArray('store-proposals.json', Array.from(storeProposals.values()));
 
   return {
     ok: true,
     message: "Propozycja sklepu zatwierdzona i konfiguracja utworzona.",
     proposal,
-    configPath
+    storeSlug
   };
 });
 
@@ -208,6 +166,7 @@ app.post("/agent/stores/proposals/:id/reject", async (request, reply) => {
   }
 
   proposal.status = "rejected";
+  await saveJsonArray('store-proposals.json', Array.from(storeProposals.values()));
 
   return {
     ok: true,
@@ -216,16 +175,21 @@ app.post("/agent/stores/proposals/:id/reject", async (request, reply) => {
   };
 });
 
-const productProposals = new Map<string, {
+type ProductProposal = {
   id: string;
   title: string;
   category: string;
   reason: string;
   suggestedPrice?: number;
   supplier?: string;
+  storeSlug?: string;
   status: 'pending' | 'approved' | 'rejected';
   createdAt: string;
-}>();
+};
+
+const productProposals = new Map<string, ProductProposal>(
+  (await loadJsonArray<ProductProposal>('product-proposals.json')).map((item) => [item.id, item])
+);
 
 app.post('/agent/products/propose', async (request, reply) => {
   const body = request.body as {
@@ -234,6 +198,7 @@ app.post('/agent/products/propose', async (request, reply) => {
     reason?: string;
     suggestedPrice?: number;
     supplier?: string;
+    storeSlug?: string;
   } | undefined;
 
   if (!body?.title || !body.category || !body.reason) {
@@ -251,11 +216,13 @@ app.post('/agent/products/propose', async (request, reply) => {
     reason: body.reason,
     suggestedPrice: body.suggestedPrice,
     supplier: body.supplier,
+    storeSlug: body.storeSlug ?? 'giovetta-living',
     status: 'pending' as const,
     createdAt: new Date().toISOString()
   };
 
   productProposals.set(id, proposal);
+  await saveJsonArray('product-proposals.json', Array.from(productProposals.values()));
 
   return {
     ok: true,
@@ -290,22 +257,26 @@ app.post('/agent/products/proposals/:id/approve', async (request, reply) => {
   }
 
   const { createShopifyProduct } = await import("@dropshipping/shopify");
+  const shopifyConfig = getShopifyConfig();
+  if (!shopifyConfig) {
+    return reply.code(503).send({ ok: false, error: 'Brakuje konfiguracji Shopify w .env' });
+  }
+
+  const store = await loadStoreConfig(proposal.storeSlug ?? 'giovetta-living');
 
   const result = await createShopifyProduct(
-    {
-      shopDomain: process.env.SHOPIFY_SHOP_DOMAIN ?? "",
-      clientId: process.env.SHOPIFY_CLIENT_ID ?? "",
-      clientSecret: process.env.SHOPIFY_CLIENT_SECRET ?? ""
-    },
+    shopifyConfig,
     {
       title: proposal.title,
       description: `Produkt wybrany przez Product Scout. Powód: ${proposal.reason}`,
-      vendor: "GIOVETTA LIVING",
-      productType: proposal.category
+      vendor: store.name,
+      productType: proposal.category,
+      price: proposal.suggestedPrice
     }
   );
 
   proposal.status = 'approved';
+  await saveJsonArray('product-proposals.json', Array.from(productProposals.values()));
 
   return {
     ok: true,
@@ -334,6 +305,7 @@ app.post('/agent/products/proposals/:id/reject', async (request, reply) => {
   }
 
   proposal.status = 'rejected';
+  await saveJsonArray('product-proposals.json', Array.from(productProposals.values()));
 
   return {
     ok: true,
@@ -378,11 +350,12 @@ app.get("/", async (_request, reply) => {
 app.get("/shopify/scopes", async () => {
   const { createShopifyClient } = await import("@dropshipping/shopify");
 
-  const client = createShopifyClient({
-    shopDomain: process.env.SHOPIFY_SHOP_DOMAIN ?? "",
-    clientId: process.env.SHOPIFY_CLIENT_ID ?? "",
-    clientSecret: process.env.SHOPIFY_CLIENT_SECRET ?? ""
-  });
+  const config = getShopifyConfig();
+  if (!config) {
+    return { ok: false, error: 'Brakuje konfiguracji Shopify w .env' };
+  }
+
+  const client = createShopifyClient(config);
 
   return client.query(`
     query {
@@ -396,29 +369,42 @@ app.get("/shopify/scopes", async () => {
   `);
 });
 
-app.get("/store/config", async () => { const { storeConfig } = await import("../../../stores/giovetta-living/store.config.js"); return { ok: true, store: storeConfig }; });
+app.get("/stores/:slug/config", async (request, reply) => {
+  const { slug } = request.params as { slug: string };
+
+  try {
+    const store = await loadStoreConfig(slug);
+    return { ok: true, store };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Nie udało się wczytać konfiguracji sklepu';
+    return reply.code(404).send({ ok: false, error: message });
+  }
+});
+
+app.get("/store/config", async (_request, reply) => {
+  try {
+    const store = await loadStoreConfig('giovetta-living');
+    return { ok: true, store };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Nie udało się wczytać konfiguracji Giovetta Living';
+    return reply.code(404).send({ ok: false, error: message });
+  }
+});
 
 const port = Number(process.env.APP_PORT ?? 3000);
 const host = process.env.APP_HOST ?? '0.0.0.0';
 app.get('/shopify/test', async () => {
   const { createShopifyClient } = await import('@dropshipping/shopify');
+  const config = getShopifyConfig();
 
-  const shop = process.env.SHOPIFY_SHOP;
-  const clientId = process.env.SHOPIFY_CLIENT_ID;
-  const clientSecret = process.env.SHOPIFY_CLIENT_SECRET;
-
-  if (!shop || !clientId || !clientSecret) {
+  if (!config) {
     return {
       ok: false,
       error: 'Brakuje konfiguracji Shopify w .env'
     };
   }
 
-  const client = createShopifyClient({
-    shopDomain: shop,
-    clientId,
-    clientSecret
-  });
+  const client = createShopifyClient(config);
 
   const data = await client.query<{
     shop: {
