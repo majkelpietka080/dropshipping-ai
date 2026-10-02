@@ -140,12 +140,58 @@ app.post("/agent/stores/proposals/:id/approve", async (request, reply) => {
     return reply.code(409).send({ ok: false, error: `Propozycja ma już status: ${proposal.status}` });
   }
 
+  const { mkdir, writeFile, access } = await import("node:fs/promises");
+  const storesRoot = resolve(__dirname, "../../../stores");
+
+  const slug = proposal.name
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "new-store";
+
+  let storeSlug = slug;
+  let suffix = 2;
+
+  while (true) {
+    try {
+      await access(resolve(storesRoot, storeSlug));
+      storeSlug = `${slug}-${suffix++}`;
+    } catch {
+      break;
+    }
+  }
+
+  const storeDir = resolve(storesRoot, storeSlug);
+  const configPath = resolve(storeDir, "store.config.ts");
+
+  const config = `export const storeConfig = ${JSON.stringify({
+    id: proposal.id,
+    name: proposal.name,
+    tagline: proposal.tagline,
+    market: "EU",
+    currency: "EUR",
+    language: "pl",
+    supplierStrategy: "multi-supplier",
+    targetMargin: 0.55,
+    maxDeliveryDays: 10,
+    approvalRequired: true,
+    niche: proposal.niche,
+    productCategories: proposal.productCategories,
+    brand: proposal.brand,
+    aiInfluencer: proposal.aiInfluencer
+  }, null, 2)} as const;
+`;
+
+  await mkdir(storeDir, { recursive: true });
+  await writeFile(configPath, config, "utf8");
   proposal.status = "approved";
 
   return {
     ok: true,
-    message: "Propozycja sklepu zatwierdzona.",
-    proposal
+    message: "Propozycja sklepu zatwierdzona i konfiguracja utworzona.",
+    proposal,
+    configPath
   };
 });
 
