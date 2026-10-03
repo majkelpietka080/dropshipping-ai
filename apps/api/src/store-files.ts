@@ -16,7 +16,7 @@ export async function findAvailableStoreSlug(name: string): Promise<string> {
   const slug =
     name
       .normalize('NFKD')
-      .replace(/[\\u0300-\\u036f]/g, '')
+      .replace(/[\u0300-\u036f]/g, '')
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '') || 'new-store';
@@ -61,7 +61,7 @@ export async function loadStoreConfig(slug: string): Promise<StoreConfig> {
 
   try {
     const rawTs = await readFile(resolve(storeDir, 'store.config.ts'), 'utf8');
-    const match = rawTs.match(/^export const storeConfig = ([\\s\\S]*?) as const;\\s*$/);
+    const match = rawTs.match(/^export const storeConfig = ([\s\S]*?) as const;\s*$/);
     if (!match) throw new Error('Nieprawidłowy format store.config.ts.');
     return JSON.parse(match[1]) as StoreConfig;
   } catch (error) {
