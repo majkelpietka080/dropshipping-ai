@@ -16,7 +16,7 @@ export async function findAvailableStoreSlug(name: string): Promise<string> {
   const slug =
     name
       .normalize('NFKD')
-      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\p{Diacritic}/gu, '')
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '') || 'new-store';
