@@ -12,18 +12,22 @@ export type ShopifyTool =
 
 const API_VERSION = '2026-07';
 
-let cachedToken: string | null = null;
-let tokenExpiresAt = 0;
+const tokenCache = new Map<string, { accessToken: string; expiresAt: number }>();
 
-async function getAccessToken(config: ShopifyConfig): Promise<string> {
-  if (cachedToken && Date.now() < tokenExpiresAt - 60_000) {
-    return cachedToken!;
-  }
-
-  const domain = config.shopDomain
+function normalizeShopDomain(shopDomain: string): string {
+  return shopDomain
     .replace(/^https?:\/\//, '')
     .replace(/\.myshopify\.com\/?$/, '')
     .replace(/\/$/, '');
+}
+
+async function getAccessToken(config: ShopifyConfig): Promise<string> {
+  const domain = normalizeShopDomain(config.shopDomain);
+  const cacheKey = `${domain}:${config.clientId}`;
+  const cached = tokenCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiresAt - 60_000) {
+    return cached.accessToken;
+  }
 
   const response = await fetch(
     `https://${domain}.myshopify.com/admin/oauth/access_token`,
@@ -48,10 +52,18 @@ async function getAccessToken(config: ShopifyConfig): Promise<string> {
     );
   }
 
-  cachedToken = body.access_token;
-  tokenExpiresAt = Date.now() + body.expires_in * 1000;
+  const accessToken = body.access_token as string | undefined;
+  const expiresIn = body.expires_in as number | undefined;
+  if (!accessToken || !expiresIn) {
+    throw new Error('Shopify token response is missing access_token or expires_in.');
+  }
 
-  return cachedToken!;
+  tokenCache.set(cacheKey, {
+    accessToken,
+    expiresAt: Date.now() + expiresIn * 1000
+  });
+
+  return accessToken;
 }
 
 export async function createShopifyProduct(
@@ -152,10 +164,7 @@ export async function createShopifyProduct(
 }
 
 export function createShopifyClient(config: ShopifyConfig) {
-  const domain = config.shopDomain
-    .replace(/^https?:\/\//, '')
-    .replace(/\.myshopify\.com\/?$/, '')
-    .replace(/\/$/, '');
+  const domain = normalizeShopDomain(config.shopDomain);
 
   return {
     async query<T = unknown>(
