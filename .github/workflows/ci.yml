@@ -20,3 +20,4 @@ jobs:
           cache: pnpm
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm build
+      - run: pnpm test
