@@ -15,6 +15,7 @@ function assertSafeSlug(slug: string) {
 export async function findAvailableStoreSlug(name: string): Promise<string> {
   const slug =
     name
+      .replace(/[łŁ]/g, 'l')
       .normalize('NFKD')
       .replace(/\p{Diacritic}/gu, '')
       .toLowerCase()
