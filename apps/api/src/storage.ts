@@ -31,7 +31,7 @@ export function saveJsonArray<T>(filename: string, values: T[]): Promise<void> {
       const filePath = resolve(dataRoot, filename);
       const tempPath = `${filePath}.tmp`;
 
-      await writeFile(tempPath, JSON.stringify(values, null, 2) + '\\n', 'utf8');
+      await writeFile(tempPath, JSON.stringify(values, null, 2) + '\n', 'utf8');
       await rename(tempPath, filePath);
     });
 
