@@ -79,3 +79,39 @@ export function evaluateProduct(
     reasons
   };
 }
+
+export { convertCurrency } from './currency.js';
+
+export type { CurrencyCode, ExchangeRateProvider } from './currency.js';
+
+export { FrankfurterExchangeRateProvider } from './frankfurter.js';
+
+export { createSalesOpportunity } from './sales-opportunity.js';
+
+export type {
+  SalesStrategy,
+  SalesOpportunity,
+  SalesOpportunityConfig
+} from './sales-opportunity.js';
+
+export {
+  analyzeCompetition
+} from './competitive-intelligence.js';
+
+export type {
+  CompetitorOffer,
+  CompetitiveIntelligence
+} from './competitive-intelligence.js';
+
+export {
+  evaluateCatalogCoverage
+} from './catalog-coverage.js';
+
+export type {
+  CatalogCoverageRule,
+  CatalogCoverageResult
+} from './catalog-coverage.js';
+
+export {
+  countProductsBySubcategory
+} from './catalog-coverage.js';
