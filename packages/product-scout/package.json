@@ -6,13 +6,16 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json"
   },
   "dependencies": {
     "@dropshipping/suppliers": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
     "typescript": "^5.0.0"
   }
 }

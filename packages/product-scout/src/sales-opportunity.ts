@@ -1,4 +1,12 @@
 import type { SupplierProduct } from '@dropshipping/suppliers';
+import {
+  MARGIN_EPSILON,
+  isValidMarginPercent,
+  isValidPrice,
+  priceForMargin,
+  roundMoney,
+  roundPercent
+} from './money.js';
 
 export type SalesStrategy =
   | 'STANDARD_PRICE'
@@ -24,6 +32,9 @@ export type SalesOpportunity = {
 
   recommendedPrice: number;
   minimumAcceptablePrice: number;
+
+  // Price the strategy actually sells at; grossProfit/grossMarginPercent refer to it.
+  finalPrice: number;
 
   grossProfit: number;
   grossMarginPercent: number;
@@ -51,10 +62,8 @@ export function createSalesOpportunity(
   const valueAdvantages = config.valueAdvantages ?? [];
 
   if (
-    targetMargin < 0 ||
-    targetMargin >= 100 ||
-    minimumMargin < 0 ||
-    minimumMargin >= 100 ||
+    !isValidMarginPercent(targetMargin) ||
+    !isValidMarginPercent(minimumMargin) ||
     minimumMargin > targetMargin
   ) {
     throw new Error(
@@ -62,19 +71,38 @@ export function createSalesOpportunity(
     );
   }
 
-  const recommendedMultiplier = 1 / (1 - targetMargin / 100);
-  const minimumMultiplier = 1 / (1 - minimumMargin / 100);
+  if (competitorPrice !== undefined && !isValidPrice(competitorPrice)) {
+    throw new Error(
+      `Nieprawidłowa cena konkurencji: ${competitorPrice}.`
+    );
+  }
 
-  const recommendedPrice = Number(
-    (product.price * recommendedMultiplier).toFixed(2)
-  );
+  // Suppliers may report a missing price as 0; never compute margins from it.
+  if (!isValidPrice(product.price)) {
+    return {
+      product,
+      supplierCost: product.price,
+      supplierCurrency: product.currency,
+      recommendedPrice: 0,
+      minimumAcceptablePrice: 0,
+      finalPrice: 0,
+      grossProfit: 0,
+      grossMarginPercent: 0,
+      discountRoom: 0,
+      competitorPrice,
+      competitorPriceDifference: undefined,
+      salesStrategy: 'NO_OFFER',
+      valueAdvantages,
+      reasons: ['Brak prawidłowej ceny dostawcy.'],
+      isSellable: false
+    };
+  }
 
-  const minimumAcceptablePrice = Number(
-    (product.price * minimumMultiplier).toFixed(2)
-  );
+  const recommendedPrice = priceForMargin(product.price, targetMargin);
+  const minimumAcceptablePrice = priceForMargin(product.price, minimumMargin);
 
-  const discountRoom = Number(
-    Math.max(0, recommendedPrice - minimumAcceptablePrice).toFixed(2)
+  const discountRoom = roundMoney(
+    Math.max(0, recommendedPrice - minimumAcceptablePrice)
   );
 
   const reasons: string[] = [];
@@ -104,16 +132,17 @@ export function createSalesOpportunity(
     competitorPrice !== undefined &&
     competitorPrice < recommendedPrice
   ) {
-    finalPrice = Number(
-      Math.max(minimumAcceptablePrice, competitorPrice).toFixed(2)
-    );
-
-    if (valueAdvantages.length > 0 && finalPrice > competitorPrice) {
+    if (valueAdvantages.length > 0) {
+      // Documented advantages justify keeping the recommended price above
+      // the competitor, same as when the competitor is below our minimum.
       salesStrategy = 'VALUE_SELL';
       reasons.push(
         'Oferta może konkurować dzięki udokumentowanym przewagom wartości.'
       );
     } else {
+      finalPrice = roundMoney(
+        Math.max(minimumAcceptablePrice, competitorPrice)
+      );
       salesStrategy = 'DISCOUNT';
       reasons.push(
         'Cena może zostać obniżona w granicach bezpiecznej marży.'
@@ -131,23 +160,19 @@ export function createSalesOpportunity(
     );
   }
 
-  const grossProfit = Number(
-    (finalPrice - product.price).toFixed(2)
-  );
-
-  const grossMarginPercent = Number(
-    ((grossProfit / finalPrice) * 100).toFixed(1)
-  );
+  const grossProfit = roundMoney(finalPrice - product.price);
+  const rawMarginPercent = ((finalPrice - product.price) / finalPrice) * 100;
+  const grossMarginPercent = roundPercent(rawMarginPercent);
 
   const competitorPriceDifference =
     competitorPrice !== undefined
-      ? Number((finalPrice - competitorPrice).toFixed(2))
+      ? roundMoney(finalPrice - competitorPrice)
       : undefined;
 
   const isSellable =
     product.available &&
     finalPrice >= minimumAcceptablePrice &&
-    grossMarginPercent >= minimumMargin &&
+    rawMarginPercent + MARGIN_EPSILON >= minimumMargin &&
     salesStrategy !== 'NO_OFFER';
 
   if (!isSellable && salesStrategy !== 'NO_OFFER') {
@@ -163,6 +188,7 @@ export function createSalesOpportunity(
     supplierCurrency: product.currency,
     recommendedPrice,
     minimumAcceptablePrice,
+    finalPrice,
     grossProfit,
     grossMarginPercent,
     discountRoom,

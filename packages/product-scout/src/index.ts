@@ -1,4 +1,12 @@
 import type { SupplierProduct } from '@dropshipping/suppliers';
+import {
+  MARGIN_EPSILON,
+  isValidMarginPercent,
+  isValidPrice,
+  priceForMargin,
+  roundMoney,
+  roundPercent
+} from './money.js';
 
 export type ProductEvaluation = {
   product: SupplierProduct;
@@ -21,16 +29,31 @@ export function evaluateProduct(
   const targetMargin = config.targetMarginPercent ?? 55;
   const maxDeliveryDays = config.maxDeliveryDays ?? 10;
 
-  const multiplier = 1 / (1 - targetMargin / 100);
-  const suggestedPrice = Number((product.price * multiplier).toFixed(2));
+  if (!isValidMarginPercent(targetMargin)) {
+    throw new Error('Nieprawidłowe ustawienie marży docelowej.');
+  }
 
-  const grossProfit = Number((suggestedPrice - product.price).toFixed(2));
-  const grossMarginPercent = Number(
-    ((grossProfit / suggestedPrice) * 100).toFixed(1)
-  );
+  // Suppliers may report a missing price as 0; never compute margins from it.
+  const hasValidPrice = isValidPrice(product.price);
+
+  const suggestedPrice = hasValidPrice
+    ? priceForMargin(product.price, targetMargin)
+    : 0;
+
+  const grossProfit = hasValidPrice
+    ? roundMoney(suggestedPrice - product.price)
+    : 0;
+  const rawMarginPercent = hasValidPrice
+    ? ((suggestedPrice - product.price) / suggestedPrice) * 100
+    : 0;
+  const grossMarginPercent = roundPercent(rawMarginPercent);
 
   let score = 50;
   const reasons: string[] = [];
+
+  if (!hasValidPrice) {
+    reasons.push('Brak prawidłowej ceny dostawcy.');
+  }
 
   if (product.available) {
     score += 15;
@@ -60,7 +83,7 @@ export function evaluateProduct(
     }
   }
 
-  if (grossMarginPercent >= targetMargin) {
+  if (hasValidPrice && rawMarginPercent + MARGIN_EPSILON >= targetMargin) {
     score += 15;
     reasons.push('Produkt osiąga docelową marżę brutto.');
   } else {
@@ -68,7 +91,7 @@ export function evaluateProduct(
     reasons.push('Produkt nie osiąga docelowej marży brutto.');
   }
 
-  score = Math.max(0, Math.min(100, score));
+  score = hasValidPrice ? Math.max(0, Math.min(100, score)) : 0;
 
   return {
     product,
@@ -80,11 +103,13 @@ export function evaluateProduct(
   };
 }
 
-export { convertCurrency } from './currency.js';
+export { convertCurrency, normalizeCurrencyCode } from './currency.js';
 
 export type { CurrencyCode, ExchangeRateProvider } from './currency.js';
 
 export { FrankfurterExchangeRateProvider } from './frankfurter.js';
+
+export type { FrankfurterOptions } from './frankfurter.js';
 
 export { createSalesOpportunity } from './sales-opportunity.js';
 
@@ -100,7 +125,8 @@ export {
 
 export type {
   CompetitorOffer,
-  CompetitiveIntelligence
+  CompetitiveIntelligence,
+  CompetitiveAnalysisOptions
 } from './competitive-intelligence.js';
 
 export {

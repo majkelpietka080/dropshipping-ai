@@ -1,4 +1,5 @@
 import type { SupplierProduct } from '@dropshipping/suppliers';
+import { roundMoney, roundPercent } from './money.js';
 
 export type CompetitorOffer = {
   name: string;
@@ -21,9 +22,23 @@ export type CompetitiveIntelligence = {
   hasVerifiedAdvantage: boolean;
 };
 
+export type CompetitiveAnalysisOptions = {
+  // Our selling price in product.currency. Defaults to the supplier cost
+  // (product.price) for backward compatibility.
+  ourPrice?: number;
+};
+
+// Statutory withdrawal period for distance sales in the EU/PL.
+const STATUTORY_RETURN_DAYS = 14;
+
+function sameCurrency(a: string, b: string): boolean {
+  return a.trim().toUpperCase() === b.trim().toUpperCase();
+}
+
 export function analyzeCompetition(
   product: SupplierProduct,
-  competitor?: CompetitorOffer
+  competitor?: CompetitorOffer,
+  options: CompetitiveAnalysisOptions = {}
 ): CompetitiveIntelligence {
   if (!competitor) {
     return {
@@ -33,13 +48,21 @@ export function analyzeCompetition(
     };
   }
 
-  const priceDifference = Number(
-    (product.price - competitor.price).toFixed(2)
-  );
+  const ourPrice = options.ourPrice ?? product.price;
+
+  // Prices in different currencies are not comparable without conversion.
+  const comparable =
+    sameCurrency(product.currency, competitor.currency) &&
+    Number.isFinite(ourPrice) &&
+    Number.isFinite(competitor.price);
+
+  const priceDifference = comparable
+    ? roundMoney(ourPrice - competitor.price)
+    : undefined;
 
   const priceDifferencePercent =
-    competitor.price > 0
-      ? Number(((priceDifference / competitor.price) * 100).toFixed(1))
+    priceDifference !== undefined && competitor.price > 0
+      ? roundPercent((priceDifference / competitor.price) * 100)
       : undefined;
 
   const advantages: string[] = [];
@@ -60,17 +83,24 @@ export function analyzeCompetition(
     }
   }
 
+  // Lists are written from our perspective. A competitor offering less than
+  // the statutory return period is our advantage, since we must offer it.
   if (
     competitor.returnDays !== undefined &&
-    competitor.returnDays < 14
+    competitor.returnDays < STATUTORY_RETURN_DAYS
   ) {
-    disadvantages.push(
-      `Konkurent deklaruje ${competitor.returnDays} dni na zwrot.`
+    advantages.push(
+      `Konkurent deklaruje tylko ${competitor.returnDays} dni na zwrot (ustawowo ${STATUTORY_RETURN_DAYS} dni).`
     );
   }
 
-  if (competitor.warrantyMonths !== undefined) {
-    advantages.push(
+  // We have no warranty data for our product, so a declared competitor
+  // warranty is a point against us, not a verified advantage.
+  if (
+    competitor.warrantyMonths !== undefined &&
+    competitor.warrantyMonths > 0
+  ) {
+    disadvantages.push(
       `Konkurent deklaruje gwarancję ${competitor.warrantyMonths} miesięcy.`
     );
   }
