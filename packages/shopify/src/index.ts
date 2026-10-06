@@ -116,6 +116,7 @@ export async function createShopifyProduct(
       descriptionHtml: input.description ?? '',
       vendor: input.vendor ?? 'GIOVETTA LIVING',
       productType: input.productType ?? '',
+      tags: ['giovetta'],
       status: 'DRAFT'
     }
   });
@@ -161,6 +162,145 @@ export async function createShopifyProduct(
   }
 
   return result.productCreate;
+}
+
+
+export async function setShopifyProductInventory(
+  config: ShopifyConfig,
+  productId: string,
+  quantity: number
+) {
+  const client = createShopifyClient(config);
+
+  const productResult = await client.query<{
+    product: {
+      variants: {
+        nodes: Array<{
+          inventoryItem: { id: string };
+        }>;
+      };
+    } | null;
+  }>(`
+    query productInventoryItem($id: ID!) {
+      product(id: $id) {
+        variants(first: 1) {
+          nodes {
+            inventoryItem {
+              id
+            }
+          }
+        }
+      }
+    }
+  `, { id: productId });
+
+  const inventoryItemId =
+    productResult.product?.variants.nodes[0]?.inventoryItem.id;
+
+  if (!inventoryItemId) {
+    throw new Error(`Nie znaleziono inventory item dla produktu ${productId}.`);
+  }
+
+  const locationsResult = await client.query<{
+    locations: {
+      nodes: Array<{ id: string }>;
+    };
+  }>(`
+    query inventoryLocations {
+      locations(first: 10) {
+        nodes {
+          id
+        }
+      }
+    }
+  `);
+
+  const locationId = locationsResult.locations.nodes[0]?.id;
+
+  if (!locationId) {
+    throw new Error('Nie znaleziono lokalizacji magazynowej Shopify.');
+  }
+
+  const result = await client.query<{
+    inventorySetQuantities: {
+      inventoryAdjustmentGroup: {
+        createdAt: string;
+      } | null;
+      userErrors: Array<{ field?: string[]; message: string }>;
+    };
+  }>(`
+    mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
+      inventorySetQuantities(input: $input) {
+        inventoryAdjustmentGroup {
+          createdAt
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `, {
+    input: {
+      name: 'available',
+      reason: 'correction',
+      ignoreCompareQuantity: true,
+      quantities: [
+        {
+          inventoryItemId,
+          locationId,
+          quantity: Math.max(0, Math.floor(quantity))
+        }
+      ]
+    }
+  });
+
+  if (result.inventorySetQuantities.userErrors.length) {
+    throw new Error(
+      result.inventorySetQuantities.userErrors
+        .map((error) => error.message)
+        .join("; ")
+    );
+  }
+
+  return result.inventorySetQuantities;
+}
+
+export async function tagShopifyProduct(
+  config: ShopifyConfig,
+  productId: string,
+  tags: string[]
+) {
+  const client = createShopifyClient(config);
+  const result = await client.query<{
+    productUpdate: {
+      product: { id: string; title: string; status: string; tags: string[] } | null;
+      userErrors: Array<{ field?: string[]; message: string }>;
+    };
+  }>(`
+    mutation productUpdate($product: ProductUpdateInput!) {
+      productUpdate(product: $product) {
+        product {
+          id
+          title
+          status
+          tags
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `, { product: { id: productId, tags } });
+
+  if (result.productUpdate.userErrors.length) {
+    throw new Error(
+      result.productUpdate.userErrors.map((error) => error.message).join("; ")
+    );
+  }
+
+  return result.productUpdate;
 }
 
 export function createShopifyClient(config: ShopifyConfig) {
