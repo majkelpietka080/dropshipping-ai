@@ -4,6 +4,16 @@ import type {
   SupplierSearchParams
 } from './index.js';
 
+export type SupplierSearchError = {
+  supplier: string;
+  message: string;
+};
+
+export type SupplierSearchResult = {
+  products: SupplierProduct[];
+  errors: SupplierSearchError[];
+};
+
 export class SupplierManager {
   private adapters: SupplierAdapter[] = [];
 
@@ -18,11 +28,35 @@ export class SupplierManager {
   async searchProducts(
     params: SupplierSearchParams
   ): Promise<SupplierProduct[]> {
-    const results = await Promise.all(
+    const { products } = await this.searchProductsWithErrors(params);
+    return products;
+  }
+
+  // One failing supplier must not discard results from the others.
+  async searchProductsWithErrors(
+    params: SupplierSearchParams
+  ): Promise<SupplierSearchResult> {
+    const results = await Promise.allSettled(
       this.adapters.map((adapter) => adapter.searchProducts(params))
     );
 
-    const products = results.flat();
+    const products: SupplierProduct[] = [];
+    const errors: SupplierSearchError[] = [];
+
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        products.push(...result.value);
+      } else {
+        errors.push({
+          supplier: this.adapters[index].name,
+          message:
+            result.reason instanceof Error
+              ? result.reason.message
+              : String(result.reason)
+        });
+      }
+    });
+
     const unique = new Map<string, SupplierProduct>();
 
     for (const product of products) {
@@ -30,6 +64,6 @@ export class SupplierManager {
       unique.set(key, product);
     }
 
-    return Array.from(unique.values());
+    return { products: Array.from(unique.values()), errors };
   }
 }

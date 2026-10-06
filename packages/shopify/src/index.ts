@@ -128,42 +128,60 @@ export async function createShopifyProduct(
   const product = result.productCreate.product;
 
   if (input.price !== undefined && product?.id && product.variants.nodes[0]?.id) {
-    const priceResult = await client.query<{
-      productVariantsBulkUpdate: {
-        productVariants: Array<{ id: string; price: string }>;
-        userErrors: Array<{ field?: string[]; message: string }>;
-      };
-    }>(`
-      mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-        productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-          productVariants {
-            id
-            price
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `, {
-      productId: product.id,
-      variants: [{ id: product.variants.nodes[0].id, price: input.price }]
-    });
-
-    if (priceResult.productVariantsBulkUpdate.userErrors.length) {
-      throw new Error(`Shopify variant price error: ${JSON.stringify(priceResult.productVariantsBulkUpdate.userErrors)}`);
-    }
+    const priceUpdate = await setShopifyVariantPrice(
+      config,
+      product.id,
+      product.variants.nodes[0].id,
+      input.price
+    );
 
     return {
       ...result.productCreate,
-      priceUpdate: priceResult.productVariantsBulkUpdate
+      priceUpdate
     };
   }
 
   return result.productCreate;
 }
 
+
+export async function setShopifyVariantPrice(
+  config: ShopifyConfig,
+  productId: string,
+  variantId: string,
+  price: number
+) {
+  const client = createShopifyClient(config);
+
+  const priceResult = await client.query<{
+    productVariantsBulkUpdate: {
+      productVariants: Array<{ id: string; price: string }>;
+      userErrors: Array<{ field?: string[]; message: string }>;
+    };
+  }>(`
+    mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+        productVariants {
+          id
+          price
+        }
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `, {
+    productId,
+    variants: [{ id: variantId, price }]
+  });
+
+  if (priceResult.productVariantsBulkUpdate.userErrors.length) {
+    throw new Error(`Shopify variant price error: ${JSON.stringify(priceResult.productVariantsBulkUpdate.userErrors)}`);
+  }
+
+  return priceResult.productVariantsBulkUpdate;
+}
 
 export async function setShopifyProductInventory(
   config: ShopifyConfig,

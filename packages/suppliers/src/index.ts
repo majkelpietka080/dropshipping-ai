@@ -31,6 +31,7 @@ export interface SupplierAdapter {
 }
 
 export { SupplierManager } from "./manager.js";
+export type { SupplierSearchError, SupplierSearchResult } from "./manager.js";
 export { MockSupplier } from "./mock.js";
 
 export { BigBuySupplier } from './adapters/bigbuy.js';

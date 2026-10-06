@@ -8,7 +8,7 @@ dotenv.config({
   override: true
 });
 
-import Fastify from 'fastify';
+import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import { askClaude } from '@dropshipping/ai';
 import { createStoreConfig, type StoreProposal } from '@dropshipping/stores';
@@ -20,13 +20,89 @@ import {
   createSalesOpportunity,
   analyzeCompetition,
   convertCurrency,
+  normalizeCurrencyCode,
   FrankfurterExchangeRateProvider,
   evaluateCatalogCoverage,
   countProductsBySubcategory
 } from '@dropshipping/product-scout';
+import {
+  STORE_SLUG_PATTERN,
+  getAdminToken,
+  parseOptionalNumber,
+  publicErrorDetails,
+  redactUrlForLogs,
+  registerAdminAuth,
+  resolveCorsOrigins
+} from './security.js';
+import {
+  ALLEGRO_STATE_COOKIE,
+  OAuthStateStore,
+  checkRedirectUri,
+  clearStateCookie,
+  readCookie,
+  stateCookie
+} from './allegro-oauth.js';
+import {
+  InFlightGuard,
+  approveProductProposal,
+  toShopifyProductGid
+} from './product-approval.js';
 
-const app = Fastify({ logger: true });
-await app.register(cors, { origin: true });
+const app = Fastify({
+  logger: {
+    serializers: {
+      req(request) {
+        return {
+          method: request.method,
+          url: redactUrlForLogs(request.url),
+          remoteAddress: request.ip
+        };
+      }
+    }
+  }
+});
+
+const corsOrigins = resolveCorsOrigins();
+
+await app.register(cors, {
+  origin: (origin, callback) => {
+    callback(null, origin !== undefined && corsOrigins.has(origin));
+  }
+});
+
+// Registered before any route so every non-public route gets the admin check.
+registerAdminAuth(app);
+
+app.setErrorHandler((error: FastifyError, request, reply) => {
+  request.log.error(error);
+
+  const statusCode = error.statusCode && error.statusCode >= 400 ? error.statusCode : 500;
+
+  return reply.code(statusCode).send({
+    ok: false,
+    error: statusCode < 500 ? publicErrorDetails(error) : 'Wewnętrzny błąd serwera.'
+  });
+});
+
+// Upstream (Shopify, suppliers, AI) failures: 502 with a readable, redacted reason.
+function sendUpstreamError(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  message: string,
+  error: unknown
+) {
+  request.log.error(error);
+
+  return reply.code(502).send({
+    ok: false,
+    error: message,
+    details: publicErrorDetails(error)
+  });
+}
+
+const allegroStates = new OAuthStateStore();
+const isSecureCookie = (process.env.ALLEGRO_REDIRECT_URI ?? '').startsWith('https://');
+
 app.get('/allegro/oauth/start', async (_request, reply) => {
   const clientId = process.env.ALLEGRO_CLIENT_ID;
   const redirectUri = process.env.ALLEGRO_REDIRECT_URI;
@@ -45,18 +121,36 @@ app.get('/allegro/oauth/start', async (_request, reply) => {
     authBaseUrl
   );
 
+  const state = allegroStates.create();
+
   authorizationUrl.searchParams.set('response_type', 'code');
   authorizationUrl.searchParams.set('client_id', clientId);
   authorizationUrl.searchParams.set('redirect_uri', redirectUri);
+  authorizationUrl.searchParams.set('state', state);
 
+  reply.header('Set-Cookie', stateCookie(state, isSecureCookie));
   return reply.redirect(authorizationUrl.toString());
 });
 app.get('/allegro/oauth/callback', async (request, reply) => {
   const query = request.query as {
     code?: string;
+    state?: string;
     error?: string;
     error_description?: string;
   };
+
+  const stateIsValid = allegroStates.consume(
+    query.state,
+    readCookie(request.headers.cookie, ALLEGRO_STATE_COOKIE)
+  );
+
+  reply.header('Set-Cookie', clearStateCookie(isSecureCookie));
+
+  if (!stateIsValid) {
+    return reply.code(400).send({
+      error: 'Invalid or expired OAuth state. Start again from /allegro/oauth/start.'
+    });
+  }
 
   if (query.error) {
     return reply.code(400).send({
@@ -88,28 +182,46 @@ app.get('/allegro/oauth/callback', async (request, reply) => {
     `${clientId}:${clientSecret}`
   ).toString('base64');
 
-  const tokenResponse = await fetch(
-    new URL('/auth/oauth/token', authBaseUrl),
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Basic ${credentials}`,
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      body: new URLSearchParams({
-        grant_type: 'authorization_code',
-        code: query.code,
-        redirect_uri: redirectUri
-      })
-    }
-  );
+  let tokenResponse: Response;
+  let tokenData: {
+    token_type?: string;
+    expires_in?: number;
+    error?: string;
+    error_description?: string;
+  };
 
-  const tokenData = await tokenResponse.json();
+  try {
+    tokenResponse = await fetch(
+      new URL('/auth/oauth/token', authBaseUrl),
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Basic ${credentials}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: query.code,
+          redirect_uri: redirectUri
+        }),
+        signal: AbortSignal.timeout(15_000)
+      }
+    );
+
+    tokenData = await tokenResponse.json().catch(() => ({}));
+  } catch (error) {
+    return sendUpstreamError(request, reply, 'Allegro token exchange failed', error);
+  }
 
   if (!tokenResponse.ok) {
-    return reply.code(tokenResponse.status).send({
+    // Only Allegro's error code/description are forwarded, never the raw body.
+    return reply.code(502).send({
       error: 'Allegro token exchange failed',
-      details: tokenData
+      upstreamStatus: tokenResponse.status,
+      details: {
+        error: tokenData.error,
+        error_description: tokenData.error_description
+      }
     });
   }
 
@@ -126,55 +238,65 @@ app.get('/health', async () => ({ ok: true, service: 'dropshipping-ai-api' }));
 app.post('/ai/test', async (request, reply) => {
   const body = request.body as { prompt?: string } | undefined;
   if (!body?.prompt) return reply.code(400).send({ error: 'prompt is required' });
-  return { response: await askClaude(body.prompt) };
+
+  try {
+    return { response: await askClaude(body.prompt) };
+  } catch (error) {
+    return sendUpstreamError(request, reply, 'Zapytanie do Claude nie powiodło się.', error);
+  }
 });
 
 
-app.get('/shopify/products', async () => {
+type ShopifyProductsData = {
+  products: {
+    edges: Array<{
+      node: {
+        id: string;
+        title: string;
+        handle: string;
+        vendor: string;
+        productType: string;
+        tags: string[];
+        totalInventory: number;
+        featuredImage: { url: string; altText: string | null } | null;
+        images: { nodes: Array<{ url: string; altText: string | null }> };
+        priceRange: {
+          minVariantPrice: { amount: string; currencyCode: string };
+        };
+        variants: {
+          nodes: Array<{
+            id: string;
+            title: string;
+            price: string;
+            compareAtPrice: string | null;
+            availableForSale: boolean;
+            inventoryQuantity: number | null;
+          }>;
+        };
+      };
+    }>;
+    pageInfo: {
+      hasNextPage: boolean;
+    };
+  };
+};
+
+app.get('/shopify/products', async (request, reply) => {
   const { createShopifyClient } = await import('@dropshipping/shopify');
 
   const store = await loadStoreConfig('giovetta-living');
   const config = getShopifyConfig();
 
   if (!config) {
-    return { ok: false, error: 'Brakuje konfiguracji Shopify w .env' };
+    return reply.code(503).send({ ok: false, error: 'Brakuje konfiguracji Shopify w .env' });
   }
 
   const client = createShopifyClient(config);
 
-  const data = await client.query<{
-    products: {
-      edges: Array<{
-        node: {
-          id: string;
-          title: string;
-          handle: string;
-          vendor: string;
-          productType: string;
-          tags: string[];
-          totalInventory: number;
-          featuredImage: { url: string; altText: string | null } | null;
-          images: { nodes: Array<{ url: string; altText: string | null }> };
-          priceRange: {
-            minVariantPrice: { amount: string; currencyCode: string };
-          };
-          variants: {
-            nodes: Array<{
-              id: string;
-              title: string;
-              price: string;
-              compareAtPrice: string | null;
-              availableForSale: boolean;
-              inventoryQuantity: number | null;
-            }>;
-          };
-        };
-      }>;
-      pageInfo: {
-        hasNextPage: boolean;
-      };
-    };
-  }>(`
+  let data: ShopifyProductsData;
+
+  try {
+    data = await client.query<ShopifyProductsData>(`
     query {
       products(first: 50) {
         edges {
@@ -220,22 +342,13 @@ app.get('/shopify/products', async () => {
       }
     }
   `);
+  } catch (error) {
+    return sendUpstreamError(request, reply, 'Nie udało się pobrać produktów Shopify.', error);
+  }
 
   const products = data.products.edges
     .map(({ node }) => node)
     .filter((product) => {
-      if (product.id.endsWith('16121646285134')) {
-        console.log('SHOPIFY_DIAGNOSTIC', JSON.stringify({
-          id: product.id,
-          title: product.title,
-          vendor: product.vendor,
-          productType: product.productType,
-          tags: product.tags,
-          totalInventory: product.totalInventory,
-          variants: product.variants.nodes
-        }));
-      }
-
       const catalog = store.catalog;
 
       if (catalog?.shopifyVendor && product.vendor.toLowerCase() !== catalog.shopifyVendor.toLowerCase()) {
@@ -279,15 +392,16 @@ app.get('/shopify/products', async () => {
 
 app.post('/agent/products/:productId/fix-catalog', async (request, reply) => {
   const { productId } = request.params as { productId: string };
+  const productGid = toShopifyProductGid(productId);
 
-  if (productId !== '16121646285134') {
+  if (!productGid) {
     return reply.code(400).send({
       ok: false,
-      error: 'Ten tymczasowy endpoint jest ograniczony do zatwierdzonego produktu testowego.'
+      error: 'Nieprawidłowy identyfikator produktu Shopify.'
     });
   }
 
-  const { tagShopifyProduct, setShopifyProductInventory } = await import('@dropshipping/shopify');
+  const { createShopifyClient, tagShopifyProduct, setShopifyProductInventory } = await import('@dropshipping/shopify');
   const shopifyConfig = getShopifyConfig();
 
   if (!shopifyConfig) {
@@ -297,67 +411,120 @@ app.post('/agent/products/:productId/fix-catalog', async (request, reply) => {
     });
   }
 
-  await tagShopifyProduct(shopifyConfig, `gid://shopify/Product/${productId}`, ['giovetta']);
-  await setShopifyProductInventory(
-    shopifyConfig,
-    `gid://shopify/Product/${productId}`,
-    1
-  );
+  const store = await loadStoreConfig('giovetta-living');
+  const requiredTags = store.catalog?.requiredTags?.length ? store.catalog.requiredTags : ['giovetta'];
+
+  try {
+    const { product } = await createShopifyClient(shopifyConfig).query<{
+      product: { id: string; vendor: string; tags: string[] } | null;
+    }>(`
+      query catalogProduct($id: ID!) {
+        product(id: $id) {
+          id
+          vendor
+          tags
+        }
+      }
+    `, { id: productGid });
+
+    if (!product) {
+      return reply.code(404).send({
+        ok: false,
+        error: 'Produkt nie istnieje w Shopify.'
+      });
+    }
+
+    // Only products of this store's catalog may be modified, never other vendors' products.
+    const vendor = store.catalog?.shopifyVendor ?? store.name;
+
+    if (product.vendor.toLowerCase() !== vendor.toLowerCase()) {
+      return reply.code(403).send({
+        ok: false,
+        error: `Produkt nie należy do katalogu sklepu (vendor: ${product.vendor}).`
+      });
+    }
+
+    // productUpdate replaces tags, so keep the existing ones.
+    const tags = Array.from(new Set([...product.tags, ...requiredTags]));
+
+    await tagShopifyProduct(shopifyConfig, product.id, tags);
+    await setShopifyProductInventory(shopifyConfig, product.id, 1);
+  } catch (error) {
+    return sendUpstreamError(request, reply, 'Nie udało się przygotować produktu do katalogu.', error);
+  }
 
   return {
     ok: true,
-    message: 'Istniejący produkt testowy został przygotowany do katalogu.',
+    message: 'Produkt został przygotowany do katalogu.',
     productId
   };
 });
 
-app.get('/shopify/product-diagnostic', async () => {
+app.get('/shopify/product-diagnostic', async (request, reply) => {
   const { createShopifyClient } = await import('@dropshipping/shopify');
   const config = getShopifyConfig();
 
   if (!config) {
-    return { ok: false, error: 'Brakuje konfiguracji Shopify w .env' };
+    return reply.code(503).send({ ok: false, error: 'Brakuje konfiguracji Shopify w .env' });
+  }
+
+  const { productId } = request.query as { productId?: string };
+  const productGid = toShopifyProductGid(productId);
+
+  if (!productGid) {
+    return reply.code(400).send({
+      ok: false,
+      error: 'Parametr productId (liczbowe ID lub GID produktu Shopify) jest wymagany.'
+    });
   }
 
   const client = createShopifyClient(config);
 
-  const data = await client.query<{
-    product: {
-      id: string;
-      title: string;
-      vendor: string;
-      productType: string;
-      status: string;
-      tags: string[];
-      totalInventory: number;
-      variants: {
-        nodes: Array<{
-          availableForSale: boolean;
-          inventoryQuantity: number | null;
-        }>;
-      };
-    } | null;
-  }>(`
-    query {
-      product(id: "gid://shopify/Product/16121646285134") {
-        id
-        title
-        vendor
-        productType
-        status
-        tags
-        totalInventory
-        variants(first: 10) {
-          nodes {
-            availableForSale
-            inventoryQuantity
+  try {
+    const data = await client.query<{
+      product: {
+        id: string;
+        title: string;
+        vendor: string;
+        productType: string;
+        status: string;
+        tags: string[];
+        totalInventory: number;
+        variants: {
+          nodes: Array<{
+            availableForSale: boolean;
+            inventoryQuantity: number | null;
+          }>;
+        };
+      } | null;
+    }>(`
+      query productDiagnostic($id: ID!) {
+        product(id: $id) {
+          id
+          title
+          vendor
+          productType
+          status
+          tags
+          totalInventory
+          variants(first: 10) {
+            nodes {
+              availableForSale
+              inventoryQuantity
+            }
           }
         }
       }
-    }
-  `);
+    `, { id: productGid });
 
-  return { ok: true, product: data.product };
+    if (!data.product) {
+      return reply.code(404).send({ ok: false, error: 'Produkt nie istnieje w Shopify.' });
+    }
+
+    return { ok: true, product: data.product };
+  } catch (error) {
+    return sendUpstreamError(request, reply, 'Nie udało się pobrać diagnostyki produktu.', error);
+  }
 });
 
 app.get('/catalog/coverage', async (_request, reply) => {
@@ -377,9 +544,11 @@ app.get('/catalog/coverage', async (_request, reply) => {
     });
 
     if (shopifyResponse.statusCode !== 200) {
-      return reply.code(502).send({
+      const upstream = shopifyResponse.json() as { error?: string };
+
+      return reply.code(shopifyResponse.statusCode === 503 ? 503 : 502).send({
         ok: false,
-        error: 'Nie udało się pobrać produktów Shopify.',
+        error: upstream.error ?? 'Nie udało się pobrać produktów Shopify.',
         statusCode: shopifyResponse.statusCode
       });
     }
@@ -419,6 +588,8 @@ const storeProposals = new Map<string, StoreProposal>(
   (await loadJsonArray<StoreProposal>('store-proposals.json')).map((item) => [item.id, item])
 );
 
+const storeProposalOperations = new InFlightGuard();
+
 app.post("/agent/stores/propose", async (request, reply) => {
   const body = request.body as {
     name: string;
@@ -428,11 +599,30 @@ app.post("/agent/stores/propose", async (request, reply) => {
     brand: { primaryColor?: string; secondaryColor?: string; style?: string };
     aiInfluencer: { enabled: boolean; name?: string; ageRange?: string; personality?: string[] };
     reason: string;
-  };
+  } | undefined;
 
-  const proposal = {
+  if (
+    typeof body?.name !== 'string' || !body.name.trim() ||
+    typeof body.tagline !== 'string' ||
+    typeof body.niche !== 'string' ||
+    !Array.isArray(body.productCategories)
+  ) {
+    return reply.code(400).send({
+      ok: false,
+      error: 'name, tagline, niche i productCategories są wymagane'
+    });
+  }
+
+  // Explicit fields only: the body must not override id, status or createdAt.
+  const proposal: StoreProposal = {
     id: crypto.randomUUID(),
-    ...body,
+    name: body.name,
+    tagline: body.tagline,
+    niche: body.niche,
+    productCategories: body.productCategories,
+    brand: body.brand ?? {},
+    aiInfluencer: body.aiInfluencer ?? { enabled: false },
+    reason: body.reason,
     status: "pending" as const,
     createdAt: new Date().toISOString()
   };
@@ -462,20 +652,30 @@ app.post("/agent/stores/proposals/:id/approve", async (request, reply) => {
     return reply.code(409).send({ ok: false, error: `Propozycja ma już status: ${proposal.status}` });
   }
 
-  const storeSlug = await findAvailableStoreSlug(proposal.name);
-  const config = createStoreConfig({
-    id: proposal.id,
-    name: proposal.name,
-    tagline: proposal.tagline,
-    niche: proposal.niche,
-    productCategories: proposal.productCategories,
-    brand: proposal.brand,
-    aiInfluencer: proposal.aiInfluencer
-  });
+  if (!storeProposalOperations.tryAcquire(id)) {
+    return reply.code(409).send({ ok: false, error: "Ta propozycja jest właśnie przetwarzana" });
+  }
 
-  await writeStoreConfigFiles(storeSlug, config);
-  proposal.status = "approved";
-  await saveJsonArray('store-proposals.json', Array.from(storeProposals.values()));
+  let storeSlug: string;
+
+  try {
+    storeSlug = await findAvailableStoreSlug(proposal.name);
+    const config = createStoreConfig({
+      id: proposal.id,
+      name: proposal.name,
+      tagline: proposal.tagline,
+      niche: proposal.niche,
+      productCategories: proposal.productCategories,
+      brand: proposal.brand,
+      aiInfluencer: proposal.aiInfluencer
+    });
+
+    await writeStoreConfigFiles(storeSlug, config);
+    proposal.status = "approved";
+    await saveJsonArray('store-proposals.json', Array.from(storeProposals.values()));
+  } finally {
+    storeProposalOperations.release(id);
+  }
 
   return {
     ok: true,
@@ -495,6 +695,10 @@ app.post("/agent/stores/proposals/:id/reject", async (request, reply) => {
 
   if (proposal.status !== "pending") {
     return reply.code(409).send({ ok: false, error: `Propozycja ma już status: ${proposal.status}` });
+  }
+
+  if (storeProposalOperations.has(id)) {
+    return reply.code(409).send({ ok: false, error: "Ta propozycja jest właśnie przetwarzana" });
   }
 
   proposal.status = "rejected";
@@ -528,6 +732,9 @@ type ProductProposal = {
   valueAdvantages?: string[];
   isSellable?: boolean;
   storeSlug?: string;
+  shopifyProductId?: string;
+  shopifyVariantId?: string;
+  approvedAt?: string;
   status: 'pending' | 'approved' | 'rejected';
   createdAt: string;
 };
@@ -554,9 +761,18 @@ const customerNeeds = new Map<string, CustomerNeed>(
   (await loadJsonArray<CustomerNeed>('customer-needs.json')).map((item) => [item.id, item])
 );
 
+// No search survives a restart, so 'searching' here was interrupted.
+for (const need of customerNeeds.values()) {
+  if (need.status === 'searching') {
+    need.status = 'new';
+  }
+}
+
 const productProposals = new Map<string, ProductProposal>(
   (await loadJsonArray<ProductProposal>('product-proposals.json')).map((item) => [item.id, item])
 );
+
+const productApprovals = new InFlightGuard();
 
 app.post('/agent/products/propose', async (request, reply) => {
   const body = request.body as {
@@ -572,6 +788,17 @@ app.post('/agent/products/propose', async (request, reply) => {
     return reply.code(400).send({
       error: 'title, category i reason są wymagane'
     });
+  }
+
+  if (body.storeSlug !== undefined && !STORE_SLUG_PATTERN.test(body.storeSlug)) {
+    return reply.code(400).send({ error: 'Nieprawidłowy storeSlug' });
+  }
+
+  if (
+    body.suggestedPrice !== undefined &&
+    (typeof body.suggestedPrice !== 'number' || !Number.isFinite(body.suggestedPrice) || body.suggestedPrice <= 0)
+  ) {
+    return reply.code(400).send({ error: 'suggestedPrice musi być liczbą większą od zera' });
   }
 
   const id = crypto.randomUUID();
@@ -623,38 +850,82 @@ app.post('/agent/products/proposals/:id/approve', async (request, reply) => {
     });
   }
 
-  const { createShopifyProduct, tagShopifyProduct, setShopifyProductInventory } = await import("@dropshipping/shopify");
+  const { createShopifyProduct, setShopifyVariantPrice, setShopifyProductInventory } = await import("@dropshipping/shopify");
   const shopifyConfig = getShopifyConfig();
   if (!shopifyConfig) {
     return reply.code(503).send({ ok: false, error: 'Brakuje konfiguracji Shopify w .env' });
   }
 
-  const store = await loadStoreConfig(proposal.storeSlug ?? 'giovetta-living');
+  let store: Awaited<ReturnType<typeof loadStoreConfig>>;
 
-  const result = await createShopifyProduct(
-    shopifyConfig,
-    {
-      title: proposal.title,
-      description: `Produkt wybrany przez Product Scout. Powód: ${proposal.reason}`,
-      vendor: store.name,
-      productType: proposal.category,
-      price: proposal.suggestedPrice
-    }
-  );
-
-  if (result.product?.id) {
-    await setShopifyProductInventory(shopifyConfig, result.product.id, 1);
+  try {
+    store = await loadStoreConfig(proposal.storeSlug ?? 'giovetta-living');
+  } catch (error) {
+    return reply.code(400).send({ ok: false, error: publicErrorDetails(error) });
   }
 
-  proposal.status = 'approved';
-  await saveJsonArray('product-proposals.json', Array.from(productProposals.values()));
+  // Concurrent approvals of the same proposal would each create a Shopify product.
+  if (!productApprovals.tryAcquire(id)) {
+    return reply.code(409).send({
+      ok: false,
+      error: 'Zatwierdzanie tej propozycji już trwa'
+    });
+  }
 
-  return {
-    ok: true,
-    message: 'Propozycja zatwierdzona i utworzona w Shopify jako DRAFT.',
-    proposal,
-    shopify: result
-  };
+  const persist = () =>
+    saveJsonArray('product-proposals.json', Array.from(productProposals.values()));
+
+  try {
+    const outcome = await approveProductProposal(proposal, {
+      async createProduct() {
+        const created = await createShopifyProduct(shopifyConfig, {
+          title: proposal.title,
+          description: `Produkt wybrany przez Product Scout. Powód: ${proposal.reason}`,
+          vendor: store.name,
+          productType: proposal.category
+        });
+
+        return {
+          productId: created.product?.id ?? '',
+          variantId: created.product?.variants.nodes[0]?.id,
+          raw: created
+        };
+      },
+      setPrice: (productId, variantId, price) =>
+        setShopifyVariantPrice(shopifyConfig, productId, variantId, price),
+      setInventory: (productId) =>
+        setShopifyProductInventory(shopifyConfig, productId, 1),
+      persist
+    });
+
+    const shopify = {
+      ...(outcome.created as object | undefined ?? {
+        product: { id: proposal.shopifyProductId },
+        userErrors: []
+      }),
+      ...(outcome.priceUpdate ? { priceUpdate: outcome.priceUpdate } : {})
+    };
+
+    return {
+      ok: true,
+      message: outcome.reusedExistingProduct
+        ? 'Propozycja zatwierdzona; dokończono konfigurację istniejącego produktu Shopify (bez tworzenia duplikatu).'
+        : 'Propozycja zatwierdzona i utworzona w Shopify jako DRAFT.',
+      proposal,
+      shopify
+    };
+  } catch (error) {
+    return sendUpstreamError(
+      request,
+      reply,
+      proposal.shopifyProductId
+        ? 'Produkt został utworzony w Shopify, ale jego konfiguracja nie powiodła się. Ponów zatwierdzenie, aby ją dokończyć bez tworzenia duplikatu.'
+        : 'Nie udało się utworzyć produktu w Shopify.',
+      error
+    );
+  } finally {
+    productApprovals.release(id);
+  }
 });
 
 app.post('/agent/products/proposals/:id/reject', async (request, reply) => {
@@ -675,6 +946,20 @@ app.post('/agent/products/proposals/:id/reject', async (request, reply) => {
     });
   }
 
+  if (productApprovals.has(id)) {
+    return reply.code(409).send({
+      ok: false,
+      error: 'Zatwierdzanie tej propozycji już trwa'
+    });
+  }
+
+  if (proposal.shopifyProductId) {
+    return reply.code(409).send({
+      ok: false,
+      error: `Dla tej propozycji istnieje już produkt Shopify (${proposal.shopifyProductId}). Dokończ zatwierdzenie lub usuń produkt w Shopify.`
+    });
+  }
+
   proposal.status = 'rejected';
   await saveJsonArray('product-proposals.json', Array.from(productProposals.values()));
 
@@ -684,8 +969,54 @@ app.post('/agent/products/proposals/:id/reject', async (request, reply) => {
   };
 });
 
-app.get('/suppliers/search', async (request) => {
+type SupplierSearchInput = Parameters<
+  ReturnType<typeof import('./suppliers.js').createSupplierManager>['searchProducts']
+>[0];
+
+// Searches all suppliers; a failing supplier is reported in supplierErrors
+// instead of failing the request. Throws only when every result is an error.
+async function searchSuppliers(params: SupplierSearchInput) {
   const { createSupplierManager } = await import('./suppliers.js');
+  const manager = createSupplierManager();
+  const { products, errors } = await manager.searchProductsWithErrors(params);
+
+  const supplierErrors = errors.map((error) => ({
+    supplier: error.supplier,
+    message: publicErrorDetails(error.message)
+  }));
+
+  if (products.length === 0 && supplierErrors.length > 0) {
+    throw Object.assign(
+      new Error(supplierErrors.map((error) => `${error.supplier}: ${error.message}`).join('; ')),
+      { supplierErrors }
+    );
+  }
+
+  return { manager, products, supplierErrors };
+}
+
+function parseNumberParams<K extends string>(
+  values: Partial<Record<K, unknown>>,
+  keys: K[]
+): { ok: true; numbers: Partial<Record<K, number>> } | { ok: false; error: string } {
+  const numbers: Partial<Record<K, number>> = {};
+
+  for (const key of keys) {
+    const parsed = parseOptionalNumber(values[key]);
+
+    if (parsed === null) {
+      return { ok: false, error: `Parametr ${key} musi być liczbą` };
+    }
+
+    if (parsed !== undefined) {
+      numbers[key] = parsed;
+    }
+  }
+
+  return { ok: true, numbers };
+}
+
+app.get('/suppliers/search', async (request, reply) => {
   const query = request.query as {
     query?: string;
     category?: string;
@@ -695,49 +1026,62 @@ app.get('/suppliers/search', async (request) => {
     limit?: string;
   };
 
-  const manager = createSupplierManager();
+  const parsed = parseNumberParams(query, ['maxPrice', 'limit']);
 
-  const products = await manager.searchProducts({
-    query: query.query,
-    category: query.category,
-    maxPrice: query.maxPrice ? Number(query.maxPrice) : undefined,
-    currency: query.currency,
-    shippingCountry: query.shippingCountry,
-    limit: query.limit ? Number(query.limit) : undefined
-  });
+  if (!parsed.ok) {
+    return reply.code(400).send({ ok: false, error: parsed.error });
+  }
 
-  return {
-    ok: true,
-    suppliers: manager.listSuppliers(),
-    count: products.length,
-    products
-  };
+  try {
+    const { manager, products, supplierErrors } = await searchSuppliers({
+      query: query.query,
+      category: query.category,
+      maxPrice: parsed.numbers.maxPrice,
+      currency: query.currency,
+      shippingCountry: query.shippingCountry,
+      limit: parsed.numbers.limit
+    });
+
+    return {
+      ok: true,
+      suppliers: manager.listSuppliers(),
+      count: products.length,
+      products,
+      supplierErrors
+    };
+  } catch (error) {
+    return sendUpstreamError(request, reply, 'Wyszukiwanie u dostawców nie powiodło się.', error);
+  }
 });
 
 app.get("/", async (_request, reply) => {
   return reply.type("text/html").send("<h1>Giovetta Living AI</h1><p>API działa poprawnie.</p>");
 });
 
-app.get("/shopify/scopes", async () => {
+app.get("/shopify/scopes", async (request, reply) => {
   const { createShopifyClient } = await import("@dropshipping/shopify");
 
   const config = getShopifyConfig();
   if (!config) {
-    return { ok: false, error: 'Brakuje konfiguracji Shopify w .env' };
+    return reply.code(503).send({ ok: false, error: 'Brakuje konfiguracji Shopify w .env' });
   }
 
   const client = createShopifyClient(config);
 
-  return client.query(`
-    query {
-      currentAppInstallation {
-        accessScopes {
-          handle
-          description
+  try {
+    return await client.query(`
+      query {
+        currentAppInstallation {
+          accessScopes {
+            handle
+            description
+          }
         }
       }
-    }
-  `);
+    `);
+  } catch (error) {
+    return sendUpstreamError(request, reply, 'Nie udało się pobrać uprawnień Shopify.', error);
+  }
 });
 
 app.get("/stores/:slug/config", async (request, reply) => {
@@ -764,49 +1108,45 @@ app.get("/store/config", async (_request, reply) => {
 
 const port = Number(process.env.APP_PORT ?? 3000);
 const host = process.env.APP_HOST ?? '0.0.0.0';
-app.get('/shopify/test', async () => {
+app.get('/shopify/test', async (request, reply) => {
   const { createShopifyClient } = await import('@dropshipping/shopify');
   const config = getShopifyConfig();
 
   if (!config) {
-    return {
+    return reply.code(503).send({
       ok: false,
       error: 'Brakuje konfiguracji Shopify w .env'
-    };
+    });
   }
 
   const client = createShopifyClient(config);
 
-  const data = await client.query<{
-    shop: {
-      name: string;
-      myshopifyDomain: string;
-    };
-  }>(`
-    query {
-      shop {
-        name
-        myshopifyDomain
+  try {
+    const data = await client.query<{
+      shop: {
+        name: string;
+        myshopifyDomain: string;
+      };
+    }>(`
+      query {
+        shop {
+          name
+          myshopifyDomain
+        }
       }
-    }
-  `);
+    `);
 
-  return {
-    ok: true,
-    shop: data.shop
-  };
+    return {
+      ok: true,
+      shop: data.shop
+    };
+  } catch (error) {
+    return sendUpstreamError(request, reply, 'Połączenie z Shopify nie powiodło się.', error);
+  }
 });
 
 
-app.get('/agent/products/evaluate', async (request) => {
-  const { createSupplierManager } = await import('./suppliers.js');
-  const {
-    evaluateProduct,
-    createSalesOpportunity,
-    convertCurrency,
-    FrankfurterExchangeRateProvider
-  } = await import('@dropshipping/product-scout');
-
+app.get('/agent/products/evaluate', async (request, reply) => {
   const query = request.query as {
     query?: string;
     category?: string;
@@ -815,24 +1155,35 @@ app.get('/agent/products/evaluate', async (request) => {
     limit?: string;
   };
 
-  const manager = createSupplierManager();
+  const parsed = parseNumberParams(query, ['maxPrice', 'limit']);
 
-  const products = await manager.searchProducts({
-    query: query.query,
-    category: query.category,
-    maxPrice: query.maxPrice ? Number(query.maxPrice) : undefined,
-    shippingCountry: query.shippingCountry,
-    limit: query.limit ? Number(query.limit) : undefined
-  });
+  if (!parsed.ok) {
+    return reply.code(400).send({ ok: false, error: parsed.error });
+  }
 
-  const evaluations = products.map((product) =>
+  let search: Awaited<ReturnType<typeof searchSuppliers>>;
+
+  try {
+    search = await searchSuppliers({
+      query: query.query,
+      category: query.category,
+      maxPrice: parsed.numbers.maxPrice,
+      shippingCountry: query.shippingCountry,
+      limit: parsed.numbers.limit
+    });
+  } catch (error) {
+    return sendUpstreamError(request, reply, 'Wyszukiwanie u dostawców nie powiodło się.', error);
+  }
+
+  const evaluations = search.products.map((product) =>
     evaluateProduct(product)
   );
 
   return {
     ok: true,
     count: evaluations.length,
-    evaluations
+    evaluations,
+    supplierErrors: search.supplierErrors
   };
 });
 
@@ -848,29 +1199,35 @@ app.post('/agent/products/propose-from-scout', async (request, reply) => {
     storeSlug?: string;
   } | undefined;
 
-  const { createSupplierManager } = await import('./suppliers.js');
-  const {
-    evaluateProduct,
-    createSalesOpportunity,
-    convertCurrency,
-    FrankfurterExchangeRateProvider
-  } = await import('@dropshipping/product-scout');
+  const parsed = parseNumberParams(body ?? {}, ['maxPrice', 'limit', 'minScore']);
 
-  const manager = createSupplierManager();
+  if (!parsed.ok) {
+    return reply.code(400).send({ ok: false, error: parsed.error });
+  }
 
-  const products = await manager.searchProducts({
-    query: body?.query,
-    category: body?.category,
-    maxPrice: body?.maxPrice,
-    shippingCountry: body?.shippingCountry,
-    limit: body?.limit
-  });
+  if (body?.storeSlug !== undefined && !STORE_SLUG_PATTERN.test(body.storeSlug)) {
+    return reply.code(400).send({ ok: false, error: 'Nieprawidłowy storeSlug' });
+  }
 
-  const evaluations = products
+  let search: Awaited<ReturnType<typeof searchSuppliers>>;
+
+  try {
+    search = await searchSuppliers({
+      query: body?.query,
+      category: body?.category,
+      maxPrice: parsed.numbers.maxPrice,
+      shippingCountry: body?.shippingCountry,
+      limit: parsed.numbers.limit
+    });
+  } catch (error) {
+    return sendUpstreamError(request, reply, 'Wyszukiwanie u dostawców nie powiodło się.', error);
+  }
+
+  const evaluations = search.products
     .map((product) => evaluateProduct(product))
     .sort((a, b) => b.score - a.score);
 
-  const minScore = body?.minScore ?? 70;
+  const minScore = parsed.numbers.minScore ?? 70;
   const selected = evaluations.find((evaluation) => evaluation.score >= minScore);
 
   if (!selected) {
@@ -878,7 +1235,8 @@ app.post('/agent/products/propose-from-scout', async (request, reply) => {
       ok: false,
       error: 'Nie znaleziono produktu spełniającego minimalny score.',
       minScore,
-      evaluations
+      evaluations,
+      supplierErrors: search.supplierErrors
     });
   }
 
@@ -911,7 +1269,8 @@ app.post('/agent/products/propose-from-scout', async (request, reply) => {
   return {
     ok: true,
     proposal,
-    evaluation: selected
+    evaluation: selected,
+    supplierErrors: search.supplierErrors
   };
 });
 
@@ -948,6 +1307,31 @@ app.post('/agent/customer-needs', async (request, reply) => {
     });
   }
 
+  if (
+    body.budgetMax !== undefined &&
+    (typeof body.budgetMax !== 'number' || !Number.isFinite(body.budgetMax) || body.budgetMax <= 0)
+  ) {
+    return reply.code(400).send({
+      error: 'budgetMax musi być liczbą większą od zera'
+    });
+  }
+
+  let currency: string;
+
+  try {
+    currency = normalizeCurrencyCode(body.currency ?? 'PLN');
+  } catch {
+    return reply.code(400).send({
+      error: 'Nieprawidłowy kod waluty'
+    });
+  }
+
+  if (body.storeSlug !== undefined && !STORE_SLUG_PATTERN.test(body.storeSlug)) {
+    return reply.code(400).send({
+      error: 'Nieprawidłowy storeSlug'
+    });
+  }
+
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
 
@@ -956,7 +1340,7 @@ app.post('/agent/customer-needs', async (request, reply) => {
     message: body.message,
     category: body.category,
     budgetMax: body.budgetMax,
-    currency: body.currency ?? 'PLN',
+    currency,
     urgency: body.urgency,
     neededBy: body.neededBy,
     occasion: body.occasion,
@@ -990,6 +1374,8 @@ app.get('/agent/customer-needs', async () => {
   };
 });
 
+const customerNeedSearches = new InFlightGuard();
+
 app.post('/agent/customer-needs/:id/search', async (request, reply) => {
   const { id } = request.params as { id: string };
 
@@ -1007,9 +1393,40 @@ app.post('/agent/customer-needs/:id/search', async (request, reply) => {
     });
   }
 
-  const { createSupplierManager } = await import('./suppliers.js');
-  const { evaluateProduct } = await import('@dropshipping/product-scout');
+  // A second search while one is running would race on status and proposals.
+  if (!customerNeedSearches.tryAcquire(id)) {
+    return reply.code(409).send({
+      error: 'Wyszukiwanie dla tej potrzeby już trwa'
+    });
+  }
 
+  // A persisted 'searching' without an active search is left over from a
+  // crash; it is recoverable and reverts to 'new' on failure.
+  const statusBeforeSearch = need.status === 'searching' ? 'new' : need.status;
+
+  try {
+    return await runCustomerNeedSearch(need, request.log);
+  } catch (error) {
+    need.status = statusBeforeSearch;
+    need.updatedAt = new Date().toISOString();
+
+    await saveJsonArray(
+      'customer-needs.json',
+      Array.from(customerNeeds.values())
+    );
+
+    return sendUpstreamError(
+      request,
+      reply,
+      `Wyszukiwanie nie powiodło się; przywrócono status ${need.status}.`,
+      error
+    );
+  } finally {
+    customerNeedSearches.release(id);
+  }
+});
+
+async function runCustomerNeedSearch(need: CustomerNeed, log: FastifyRequest['log']) {
   need.status = 'searching';
   need.updatedAt = new Date().toISOString();
 
@@ -1018,33 +1435,41 @@ app.post('/agent/customer-needs/:id/search', async (request, reply) => {
     Array.from(customerNeeds.values())
   );
 
-  const manager = createSupplierManager();
-
-  const products = await manager.searchProducts({
+  const { products, supplierErrors } = await searchSuppliers({
     category: need.category,
     shippingCountry: 'PL',
     limit: 10
   });
 
   const exchangeRateProvider = new FrankfurterExchangeRateProvider();
+  const customerCurrency = need.currency ?? 'PLN';
 
   const evaluations = [];
+  const skippedProducts: Array<{ supplier: string; id: string; reason: string }> = [];
 
   for (const product of products) {
     const evaluation = evaluateProduct(product);
 
     let recommendedPriceInCustomerCurrency = evaluation.suggestedPrice;
 
-    if (
-      need.budgetMax !== undefined &&
-      product.currency !== (need.currency ?? 'PLN')
-    ) {
-      recommendedPriceInCustomerCurrency = await convertCurrency(
-        evaluation.suggestedPrice,
-        product.currency,
-        need.currency ?? 'PLN',
-        exchangeRateProvider
-      );
+    if (need.budgetMax !== undefined) {
+      try {
+        recommendedPriceInCustomerCurrency = await convertCurrency(
+          evaluation.suggestedPrice,
+          product.currency,
+          customerCurrency,
+          exchangeRateProvider
+        );
+      } catch (error) {
+        // One product with an unconvertible price must not abort the search.
+        log.warn({ err: error, productId: product.id }, 'currency conversion failed');
+        skippedProducts.push({
+          supplier: product.supplier,
+          id: product.id,
+          reason: publicErrorDetails(error)
+        });
+        continue;
+      }
     }
 
     if (
@@ -1092,6 +1517,14 @@ app.post('/agent/customer-needs/:id/search', async (request, reply) => {
     })
     .slice(0, 3);
 
+  // Without any match, skipped products mean the result is unreliable
+  // (e.g. exchange rates unavailable), so this is an error, not 'no_match'.
+  if (selected.length === 0 && skippedProducts.length > 0) {
+    throw new Error(
+      `Nie udało się ocenić ${skippedProducts.length} produktów: ${skippedProducts[0].reason}`
+    );
+  }
+
   if (selected.length === 0) {
     need.status = 'no_match';
     need.updatedAt = new Date().toISOString();
@@ -1105,7 +1538,8 @@ app.post('/agent/customer-needs/:id/search', async (request, reply) => {
       ok: true,
       status: 'no_match',
       need,
-      matches: []
+      matches: [],
+      supplierErrors
     };
   }
 
@@ -1164,8 +1598,24 @@ app.post('/agent/customer-needs/:id/search', async (request, reply) => {
     matches: selected.map((evaluation, index) => ({
       proposalId: proposalIds[index],
       evaluation
-    }))
+    })),
+    skippedProducts,
+    supplierErrors
   };
-});
+}
+
+if (!getAdminToken()) {
+  app.log.warn('APPROVAL_SECRET is not set (min. 16 chars); admin endpoints respond with 503.');
+}
+
+if (process.env.ALLEGRO_REDIRECT_URI) {
+  const redirectProblem = checkRedirectUri(process.env.ALLEGRO_REDIRECT_URI, port);
+
+  if (redirectProblem) {
+    app.log.warn(redirectProblem);
+  }
+}
+
+app.log.info({ corsOrigins: Array.from(corsOrigins) }, 'CORS allowed origins');
 
 await app.listen({ port, host });
