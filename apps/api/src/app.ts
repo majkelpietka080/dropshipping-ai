@@ -1,6 +1,5 @@
 import Fastify, { type FastifyError, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
-import { askClaude } from '@dropshipping/ai';
 import {
   createStoreConfig,
   toPublicStoreConfig,
@@ -51,6 +50,8 @@ import {
   sendUpstreamError
 } from './http-helpers.js';
 import { searchSuppliers } from './supplier-search.js';
+import { registerAiRoutes } from './routes/ai.js';
+import { registerSystemRoutes } from './routes/system.js';
 
 // Computed here, after dotenv.config(), so .env values are visible.
 const DEFAULT_STORE_SLUG = resolveDefaultStoreSlug();
@@ -224,18 +225,9 @@ app.get('/allegro/oauth/callback', async (request, reply) => {
   });
 });
 
-app.get('/health', async () => ({ ok: true, service: 'dropshipping-ai-api' }));
+registerSystemRoutes(app);
 
-app.post('/ai/test', async (request, reply) => {
-  const body = request.body as { prompt?: string } | undefined;
-  if (!body?.prompt) return reply.code(400).send({ error: 'prompt is required' });
-
-  try {
-    return { response: await askClaude(body.prompt) };
-  } catch (error) {
-    return sendUpstreamError(request, reply, 'Zapytanie do Claude nie powiodło się.', error);
-  }
-});
+registerAiRoutes(app);
 
 
 type ShopifyProductsData = {
@@ -995,10 +987,6 @@ app.get('/suppliers/search', async (request, reply) => {
   } catch (error) {
     return sendUpstreamError(request, reply, 'Wyszukiwanie u dostawców nie powiodło się.', error);
   }
-});
-
-app.get("/", async (_request, reply) => {
-  return reply.type("text/html").send("<h1>Giovetta Living AI</h1><p>API działa poprawnie.</p>");
 });
 
 app.get("/shopify/scopes", async (request, reply) => {
