@@ -46,6 +46,14 @@ import { registerAllegroRoutes } from './routes/allegro.js';
 import { registerShopifyRoutes } from './routes/shopify.js';
 import { registerCatalogRoutes } from './routes/catalog.js';
 import { registerSupplierRoutes } from './routes/suppliers.js';
+import {
+  customerNeedSearches,
+  customerNeeds,
+  productApprovals,
+  productProposals,
+  type CustomerNeed,
+  type ProductProposal
+} from './state.js';
 
 // Computed here, after dotenv.config(), so .env values are visible.
 const DEFAULT_STORE_SLUG = resolveDefaultStoreSlug();
@@ -226,69 +234,6 @@ app.post("/agent/stores/proposals/:id/reject", async (request, reply) => {
     proposal
   };
 });
-
-type ProductProposal = {
-  id: string;
-  title: string;
-  category: string;
-  subcategory?: string;
-  supplierProductId?: string;
-  imageUrl?: string;
-  productUrl?: string;
-  reason: string;
-  suggestedPrice?: number;
-  supplier?: string;
-  supplierCost?: number;
-  grossProfit?: number;
-  grossMarginPercent?: number;
-  score?: number;
-  minimumAcceptablePrice?: number;
-  discountRoom?: number;
-  salesStrategy?: string;
-  valueAdvantages?: string[];
-  isSellable?: boolean;
-  storeSlug?: string;
-  shopifyProductId?: string;
-  shopifyVariantId?: string;
-  approvedAt?: string;
-  status: 'pending' | 'approved' | 'rejected';
-  createdAt: string;
-};
-
-type CustomerNeed = {
-  id: string;
-  message: string;
-  category?: string;
-  budgetMax?: number;
-  currency?: string;
-  urgency: 'today' | 'few_days' | 'one_two_weeks' | 'browsing';
-  neededBy?: string;
-  occasion?: 'gift' | 'personal' | 'home' | 'travel' | 'other';
-  recipient?: string;
-  preferences?: string[];
-  status: 'new' | 'searching' | 'matched' | 'offered' | 'purchased' | 'no_match' | 'expired';
-  matchedProposalIds?: string[];
-  storeSlug?: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-const customerNeeds = new Map<string, CustomerNeed>(
-  (await loadJsonArray<CustomerNeed>('customer-needs.json')).map((item) => [item.id, item])
-);
-
-// No search survives a restart, so 'searching' here was interrupted.
-for (const need of customerNeeds.values()) {
-  if (need.status === 'searching') {
-    need.status = 'new';
-  }
-}
-
-const productProposals = new Map<string, ProductProposal>(
-  (await loadJsonArray<ProductProposal>('product-proposals.json')).map((item) => [item.id, item])
-);
-
-const productApprovals = new InFlightGuard();
 
 app.post('/agent/products/propose', async (request, reply) => {
   const body = request.body as {
@@ -731,8 +676,6 @@ app.get('/agent/customer-needs', async () => {
     needs: Array.from(customerNeeds.values())
   };
 });
-
-const customerNeedSearches = new InFlightGuard();
 
 app.post('/agent/customer-needs/:id/search', async (request, reply) => {
   const { id } = request.params as { id: string };
