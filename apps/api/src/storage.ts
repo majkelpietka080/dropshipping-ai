@@ -3,11 +3,17 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const dataRoot = resolve(__dirname, '../../../data');
+const defaultDataRoot = resolve(__dirname, '../../../data');
+
+// Read on every call so tests can point DATA_DIR at a temporary directory.
+function dataRoot(): string {
+  return process.env.DATA_DIR ? resolve(process.env.DATA_DIR) : defaultDataRoot;
+}
+
 const writeQueues = new Map<string, Promise<void>>();
 
 export async function loadJsonArray<T>(filename: string): Promise<T[]> {
-  const filePath = resolve(dataRoot, filename);
+  const filePath = resolve(dataRoot(), filename);
 
   try {
     const raw = await readFile(filePath, 'utf8');
@@ -27,8 +33,9 @@ export function saveJsonArray<T>(filename: string, values: T[]): Promise<void> {
   const next = previous
     .catch(() => undefined)
     .then(async () => {
-      await mkdir(dataRoot, { recursive: true });
-      const filePath = resolve(dataRoot, filename);
+      const root = dataRoot();
+      await mkdir(root, { recursive: true });
+      const filePath = resolve(root, filename);
       const tempPath = `${filePath}.tmp`;
 
       await writeFile(tempPath, JSON.stringify(values, null, 2) + '\n', 'utf8');
