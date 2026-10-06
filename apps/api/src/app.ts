@@ -1,8 +1,7 @@
-import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest } from 'fastify';
+import Fastify, { type FastifyError, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import { askClaude } from '@dropshipping/ai';
 import {
-  StoreConfigError,
   createStoreConfig,
   toPublicStoreConfig,
   type StoreConfig,
@@ -23,7 +22,6 @@ import {
 } from '@dropshipping/product-scout';
 import {
   STORE_SLUG_PATTERN,
-  parseOptionalNumber,
   publicErrorDetails,
   redactUrlForLogs,
   registerAdminAuth,
@@ -46,6 +44,13 @@ import {
   resolveDefaultStoreSlug,
   shopifyProductAttributes
 } from './store-settings.js';
+import {
+  loadStoreForRequest,
+  parseNumberParams,
+  sendStoreConfigError,
+  sendUpstreamError
+} from './http-helpers.js';
+import { searchSuppliers } from './supplier-search.js';
 
 // Computed here, after dotenv.config(), so .env values are visible.
 const DEFAULT_STORE_SLUG = resolveDefaultStoreSlug();
@@ -85,22 +90,6 @@ app.setErrorHandler((error: FastifyError, request, reply) => {
     error: statusCode < 500 ? publicErrorDetails(error) : 'Wewnętrzny błąd serwera.'
   });
 });
-
-// Upstream (Shopify, suppliers, AI) failures: 502 with a readable, redacted reason.
-function sendUpstreamError(
-  request: FastifyRequest,
-  reply: FastifyReply,
-  message: string,
-  error: unknown
-) {
-  request.log.error(error);
-
-  return reply.code(502).send({
-    ok: false,
-    error: message,
-    details: publicErrorDetails(error)
-  });
-}
 
 const allegroStates = new OAuthStateStore();
 const isSecureCookie = (process.env.ALLEGRO_REDIRECT_URI ?? '').startsWith('https://');
@@ -970,67 +959,6 @@ app.post('/agent/products/proposals/:id/reject', async (request, reply) => {
   };
 });
 
-// Loads the store whose pricing/delivery settings drive Product Scout.
-// Unknown store -> 400, invalid config -> 500 (admin routes, details are safe).
-async function loadStoreForRequest(reply: FastifyReply, slug: string) {
-  try {
-    return await loadStoreConfig(slug);
-  } catch (error) {
-    reply.code(error instanceof StoreConfigError ? 500 : 400).send({
-      ok: false,
-      error: publicErrorDetails(error)
-    });
-    return null;
-  }
-}
-
-type SupplierSearchInput = Parameters<
-  ReturnType<typeof import('./suppliers.js').createSupplierManager>['searchProducts']
->[0];
-
-// Searches all suppliers; a failing supplier is reported in supplierErrors
-// instead of failing the request. Throws only when every result is an error.
-async function searchSuppliers(params: SupplierSearchInput) {
-  const { createSupplierManager } = await import('./suppliers.js');
-  const manager = createSupplierManager();
-  const { products, errors } = await manager.searchProductsWithErrors(params);
-
-  const supplierErrors = errors.map((error) => ({
-    supplier: error.supplier,
-    message: publicErrorDetails(error.message)
-  }));
-
-  if (products.length === 0 && supplierErrors.length > 0) {
-    throw Object.assign(
-      new Error(supplierErrors.map((error) => `${error.supplier}: ${error.message}`).join('; ')),
-      { supplierErrors }
-    );
-  }
-
-  return { manager, products, supplierErrors };
-}
-
-function parseNumberParams<K extends string>(
-  values: Partial<Record<K, unknown>>,
-  keys: K[]
-): { ok: true; numbers: Partial<Record<K, number>> } | { ok: false; error: string } {
-  const numbers: Partial<Record<K, number>> = {};
-
-  for (const key of keys) {
-    const parsed = parseOptionalNumber(values[key]);
-
-    if (parsed === null) {
-      return { ok: false, error: `Parametr ${key} musi być liczbą` };
-    }
-
-    if (parsed !== undefined) {
-      numbers[key] = parsed;
-    }
-  }
-
-  return { ok: true, numbers };
-}
-
 app.get('/suppliers/search', async (request, reply) => {
   const query = request.query as {
     query?: string;
@@ -1098,18 +1026,6 @@ app.get("/shopify/scopes", async (request, reply) => {
     return sendUpstreamError(request, reply, 'Nie udało się pobrać uprawnień Shopify.', error);
   }
 });
-
-// Validation details may quote internal values (e.g. margins), so public
-// endpoints only log them.
-function sendStoreConfigError(request: FastifyRequest, reply: FastifyReply, error: unknown, fallback: string) {
-  if (error instanceof StoreConfigError) {
-    request.log.error(error);
-    return reply.code(500).send({ ok: false, error: 'Konfiguracja sklepu jest nieprawidłowa.' });
-  }
-
-  const message = error instanceof Error ? error.message : fallback;
-  return reply.code(404).send({ ok: false, error: message });
-}
 
 app.get("/stores/:slug/config", async (request, reply) => {
   const { slug } = request.params as { slug: string };
