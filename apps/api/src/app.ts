@@ -2,7 +2,6 @@ import Fastify, { type FastifyError, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import {
   createStoreConfig,
-  toPublicStoreConfig,
   type StoreConfig,
   type StoreProposal
 } from '@dropshipping/stores';
@@ -46,12 +45,12 @@ import {
 import {
   loadStoreForRequest,
   parseNumberParams,
-  sendStoreConfigError,
   sendUpstreamError
 } from './http-helpers.js';
 import { searchSuppliers } from './supplier-search.js';
 import { registerAiRoutes } from './routes/ai.js';
 import { registerSystemRoutes } from './routes/system.js';
+import { registerStoreConfigRoutes } from './routes/store-config.js';
 
 // Computed here, after dotenv.config(), so .env values are visible.
 const DEFAULT_STORE_SLUG = resolveDefaultStoreSlug();
@@ -1015,25 +1014,7 @@ app.get("/shopify/scopes", async (request, reply) => {
   }
 });
 
-app.get("/stores/:slug/config", async (request, reply) => {
-  const { slug } = request.params as { slug: string };
-
-  try {
-    const store = await loadStoreConfig(slug);
-    return { ok: true, store: toPublicStoreConfig(store) };
-  } catch (error) {
-    return sendStoreConfigError(request, reply, error, 'Nie udało się wczytać konfiguracji sklepu');
-  }
-});
-
-app.get("/store/config", async (request, reply) => {
-  try {
-    const store = await loadStoreConfig(DEFAULT_STORE_SLUG);
-    return { ok: true, store: toPublicStoreConfig(store) };
-  } catch (error) {
-    return sendStoreConfigError(request, reply, error, 'Nie udało się wczytać konfiguracji Giovetta Living');
-  }
-});
+registerStoreConfigRoutes(app, { defaultStoreSlug: DEFAULT_STORE_SLUG });
 
 app.get('/shopify/test', async (request, reply) => {
   const { createShopifyClient } = await import('@dropshipping/shopify');
