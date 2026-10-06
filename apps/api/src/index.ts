@@ -11,7 +11,13 @@ dotenv.config({
 import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import { askClaude } from '@dropshipping/ai';
-import { createStoreConfig, type StoreProposal } from '@dropshipping/stores';
+import {
+  StoreConfigError,
+  createStoreConfig,
+  toPublicStoreConfig,
+  type StoreConfig,
+  type StoreProposal
+} from '@dropshipping/stores';
 import { loadJsonArray, saveJsonArray } from './storage.js';
 import { findAvailableStoreSlug, loadStoreConfig, writeStoreConfigFiles } from './store-files.js';
 import { getShopifyConfig } from './shopify-config.js';
@@ -47,6 +53,14 @@ import {
   approveProductProposal,
   toShopifyProductGid
 } from './product-approval.js';
+import {
+  productScoutSettings,
+  resolveDefaultStoreSlug,
+  shopifyProductAttributes
+} from './store-settings.js';
+
+// Computed here, after dotenv.config(), so .env values are visible.
+const DEFAULT_STORE_SLUG = resolveDefaultStoreSlug();
 
 const app = Fastify({
   logger: {
@@ -284,7 +298,7 @@ type ShopifyProductsData = {
 app.get('/shopify/products', async (request, reply) => {
   const { createShopifyClient } = await import('@dropshipping/shopify');
 
-  const store = await loadStoreConfig('giovetta-living');
+  const store = await loadStoreConfig(DEFAULT_STORE_SLUG);
   const config = getShopifyConfig();
 
   if (!config) {
@@ -411,7 +425,7 @@ app.post('/agent/products/:productId/fix-catalog', async (request, reply) => {
     });
   }
 
-  const store = await loadStoreConfig('giovetta-living');
+  const store = await loadStoreConfig(DEFAULT_STORE_SLUG);
   const requiredTags = store.catalog?.requiredTags?.length ? store.catalog.requiredTags : ['giovetta'];
 
   try {
@@ -529,7 +543,7 @@ app.get('/shopify/product-diagnostic', async (request, reply) => {
 
 app.get('/catalog/coverage', async (_request, reply) => {
   try {
-    const store = await loadStoreConfig('giovetta-living');
+    const store = await loadStoreConfig(DEFAULT_STORE_SLUG);
 
     if (!store.catalogCoverage) {
       return reply.code(400).send({
@@ -810,7 +824,7 @@ app.post('/agent/products/propose', async (request, reply) => {
     reason: body.reason,
     suggestedPrice: body.suggestedPrice,
     supplier: body.supplier,
-    storeSlug: body.storeSlug ?? 'giovetta-living',
+    storeSlug: body.storeSlug ?? DEFAULT_STORE_SLUG,
     status: 'pending' as const,
     createdAt: new Date().toISOString()
   };
@@ -859,7 +873,7 @@ app.post('/agent/products/proposals/:id/approve', async (request, reply) => {
   let store: Awaited<ReturnType<typeof loadStoreConfig>>;
 
   try {
-    store = await loadStoreConfig(proposal.storeSlug ?? 'giovetta-living');
+    store = await loadStoreConfig(proposal.storeSlug ?? DEFAULT_STORE_SLUG);
   } catch (error) {
     return reply.code(400).send({ ok: false, error: publicErrorDetails(error) });
   }
@@ -881,8 +895,7 @@ app.post('/agent/products/proposals/:id/approve', async (request, reply) => {
         const created = await createShopifyProduct(shopifyConfig, {
           title: proposal.title,
           description: `Produkt wybrany przez Product Scout. Powód: ${proposal.reason}`,
-          vendor: store.name,
-          productType: proposal.category
+          ...shopifyProductAttributes(store, proposal)
         });
 
         return {
@@ -968,6 +981,20 @@ app.post('/agent/products/proposals/:id/reject', async (request, reply) => {
     proposal
   };
 });
+
+// Loads the store whose pricing/delivery settings drive Product Scout.
+// Unknown store -> 400, invalid config -> 500 (admin routes, details are safe).
+async function loadStoreForRequest(reply: FastifyReply, slug: string) {
+  try {
+    return await loadStoreConfig(slug);
+  } catch (error) {
+    reply.code(error instanceof StoreConfigError ? 500 : 400).send({
+      ok: false,
+      error: publicErrorDetails(error)
+    });
+    return null;
+  }
+}
 
 type SupplierSearchInput = Parameters<
   ReturnType<typeof import('./suppliers.js').createSupplierManager>['searchProducts']
@@ -1084,25 +1111,35 @@ app.get("/shopify/scopes", async (request, reply) => {
   }
 });
 
+// Validation details may quote internal values (e.g. margins), so public
+// endpoints only log them.
+function sendStoreConfigError(request: FastifyRequest, reply: FastifyReply, error: unknown, fallback: string) {
+  if (error instanceof StoreConfigError) {
+    request.log.error(error);
+    return reply.code(500).send({ ok: false, error: 'Konfiguracja sklepu jest nieprawidłowa.' });
+  }
+
+  const message = error instanceof Error ? error.message : fallback;
+  return reply.code(404).send({ ok: false, error: message });
+}
+
 app.get("/stores/:slug/config", async (request, reply) => {
   const { slug } = request.params as { slug: string };
 
   try {
     const store = await loadStoreConfig(slug);
-    return { ok: true, store };
+    return { ok: true, store: toPublicStoreConfig(store) };
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Nie udało się wczytać konfiguracji sklepu';
-    return reply.code(404).send({ ok: false, error: message });
+    return sendStoreConfigError(request, reply, error, 'Nie udało się wczytać konfiguracji sklepu');
   }
 });
 
-app.get("/store/config", async (_request, reply) => {
+app.get("/store/config", async (request, reply) => {
   try {
-    const store = await loadStoreConfig('giovetta-living');
-    return { ok: true, store };
+    const store = await loadStoreConfig(DEFAULT_STORE_SLUG);
+    return { ok: true, store: toPublicStoreConfig(store) };
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Nie udało się wczytać konfiguracji Giovetta Living';
-    return reply.code(404).send({ ok: false, error: message });
+    return sendStoreConfigError(request, reply, error, 'Nie udało się wczytać konfiguracji Giovetta Living');
   }
 });
 
@@ -1161,6 +1198,14 @@ app.get('/agent/products/evaluate', async (request, reply) => {
     return reply.code(400).send({ ok: false, error: parsed.error });
   }
 
+  const store = await loadStoreForRequest(reply, DEFAULT_STORE_SLUG);
+
+  if (!store) {
+    return reply;
+  }
+
+  const scoutSettings = productScoutSettings(store);
+
   let search: Awaited<ReturnType<typeof searchSuppliers>>;
 
   try {
@@ -1176,7 +1221,7 @@ app.get('/agent/products/evaluate', async (request, reply) => {
   }
 
   const evaluations = search.products.map((product) =>
-    evaluateProduct(product)
+    evaluateProduct(product, scoutSettings.evaluation)
   );
 
   return {
@@ -1209,6 +1254,14 @@ app.post('/agent/products/propose-from-scout', async (request, reply) => {
     return reply.code(400).send({ ok: false, error: 'Nieprawidłowy storeSlug' });
   }
 
+  const store = await loadStoreForRequest(reply, body?.storeSlug ?? DEFAULT_STORE_SLUG);
+
+  if (!store) {
+    return reply;
+  }
+
+  const scoutSettings = productScoutSettings(store);
+
   let search: Awaited<ReturnType<typeof searchSuppliers>>;
 
   try {
@@ -1224,7 +1277,7 @@ app.post('/agent/products/propose-from-scout', async (request, reply) => {
   }
 
   const evaluations = search.products
-    .map((product) => evaluateProduct(product))
+    .map((product) => evaluateProduct(product, scoutSettings.evaluation))
     .sort((a, b) => b.score - a.score);
 
   const minScore = parsed.numbers.minScore ?? 70;
@@ -1255,7 +1308,7 @@ app.post('/agent/products/propose-from-scout', async (request, reply) => {
     grossProfit: selected.grossProfit,
     grossMarginPercent: selected.grossMarginPercent,
     score: selected.score,
-    storeSlug: body?.storeSlug ?? 'giovetta-living',
+    storeSlug: body?.storeSlug ?? DEFAULT_STORE_SLUG,
     status: 'pending' as const,
     createdAt: new Date().toISOString()
   };
@@ -1348,7 +1401,7 @@ app.post('/agent/customer-needs', async (request, reply) => {
     preferences: body.preferences,
     status: 'new',
     matchedProposalIds: [],
-    storeSlug: body.storeSlug ?? 'giovetta-living',
+    storeSlug: body.storeSlug ?? DEFAULT_STORE_SLUG,
     createdAt: now,
     updatedAt: now
   };
@@ -1393,6 +1446,12 @@ app.post('/agent/customer-needs/:id/search', async (request, reply) => {
     });
   }
 
+  const store = await loadStoreForRequest(reply, need.storeSlug ?? DEFAULT_STORE_SLUG);
+
+  if (!store) {
+    return reply;
+  }
+
   // A second search while one is running would race on status and proposals.
   if (!customerNeedSearches.tryAcquire(id)) {
     return reply.code(409).send({
@@ -1405,7 +1464,7 @@ app.post('/agent/customer-needs/:id/search', async (request, reply) => {
   const statusBeforeSearch = need.status === 'searching' ? 'new' : need.status;
 
   try {
-    return await runCustomerNeedSearch(need, request.log);
+    return await runCustomerNeedSearch(need, store, request.log);
   } catch (error) {
     need.status = statusBeforeSearch;
     need.updatedAt = new Date().toISOString();
@@ -1426,7 +1485,13 @@ app.post('/agent/customer-needs/:id/search', async (request, reply) => {
   }
 });
 
-async function runCustomerNeedSearch(need: CustomerNeed, log: FastifyRequest['log']) {
+async function runCustomerNeedSearch(
+  need: CustomerNeed,
+  store: StoreConfig,
+  log: FastifyRequest['log']
+) {
+  const scoutSettings = productScoutSettings(store);
+
   need.status = 'searching';
   need.updatedAt = new Date().toISOString();
 
@@ -1448,7 +1513,7 @@ async function runCustomerNeedSearch(need: CustomerNeed, log: FastifyRequest['lo
   const skippedProducts: Array<{ supplier: string; id: string; reason: string }> = [];
 
   for (const product of products) {
-    const evaluation = evaluateProduct(product);
+    const evaluation = evaluateProduct(product, scoutSettings.evaluation);
 
     let recommendedPriceInCustomerCurrency = evaluation.suggestedPrice;
 
@@ -1479,7 +1544,7 @@ async function runCustomerNeedSearch(need: CustomerNeed, log: FastifyRequest['lo
       continue;
     }
 
-    const salesOpportunity = createSalesOpportunity(product);
+    const salesOpportunity = createSalesOpportunity(product, scoutSettings.salesOpportunity);
 
     evaluations.push({
       ...evaluation,
@@ -1568,7 +1633,7 @@ async function runCustomerNeedSearch(need: CustomerNeed, log: FastifyRequest['lo
       salesStrategy: evaluation.salesOpportunity.salesStrategy,
       valueAdvantages: evaluation.salesOpportunity.valueAdvantages,
       isSellable: evaluation.salesOpportunity.isSellable,
-      storeSlug: need.storeSlug ?? 'giovetta-living',
+      storeSlug: need.storeSlug ?? DEFAULT_STORE_SLUG,
       status: 'pending',
       createdAt: new Date().toISOString()
     };

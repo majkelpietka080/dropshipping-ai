@@ -74,6 +74,7 @@ export async function createShopifyProduct(
     vendor?: string;
     productType?: string;
     price?: number;
+    tags?: string[];
   }
 ) {
   const client = createShopifyClient(config);
@@ -116,7 +117,7 @@ export async function createShopifyProduct(
       descriptionHtml: input.description ?? '',
       vendor: input.vendor ?? 'GIOVETTA LIVING',
       productType: input.productType ?? '',
-      tags: ['giovetta'],
+      tags: input.tags?.length ? input.tags : ['giovetta'],
       status: 'DRAFT'
     }
   });

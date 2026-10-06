@@ -1,8 +1,26 @@
 export const storeConfig = {
   "id": "giovetta-living",
+  "slug": "giovetta-living",
   "name": "Giovetta Living",
   "tagline": "La vita, con stile",
+  "market": "PL",
+  "currency": "PLN",
+  "language": "pl",
+  "locale": "pl-PL",
   "niche": "smart living i lifestyle",
+  "pricing": {
+    "targetMarginPercent": 55,
+    "minimumMarginPercent": 20,
+    "pricesIncludeVat": true,
+    "vatRatePercent": 23
+  },
+  "recommendations": {
+    "maxDeliveryDays": 10
+  },
+  "audience": {
+    "ageMin": 25,
+    "ageMax": 60
+  },
   "productCategories": [
     "Home & Living",
     "Travel & Organization",
@@ -110,7 +128,7 @@ export const storeConfig = {
   "aiInfluencer": {
     "enabled": true,
     "name": "Giovetta",
-    "ageRange": "25-30",
+    "ageRange": "30-35",
     "personality": [
       "inteligentna",
       "pewna siebie",

@@ -1,7 +1,7 @@
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { StoreConfig } from '@dropshipping/stores';
+import { parseStoreConfig, type StoreConfig } from '@dropshipping/stores';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const storesRoot = resolve(__dirname, '../../../stores');
@@ -49,13 +49,18 @@ export async function writeStoreConfigFiles(slug: string, config: StoreConfig): 
 }
 
 export async function loadStoreConfig(slug: string): Promise<StoreConfig> {
+  return loadStoreConfigFrom(storesRoot, slug);
+}
+
+// Throws StoreConfigError (listing every problem) when the config is invalid.
+export async function loadStoreConfigFrom(root: string, slug: string): Promise<StoreConfig> {
   assertSafeSlug(slug);
 
-  const storeDir = resolve(storesRoot, slug);
+  const storeDir = resolve(root, slug);
 
   try {
     const rawJson = await readFile(resolve(storeDir, 'store.config.json'), 'utf8');
-    return JSON.parse(rawJson) as StoreConfig;
+    return parseStoreConfig(JSON.parse(rawJson), slug);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
@@ -64,7 +69,7 @@ export async function loadStoreConfig(slug: string): Promise<StoreConfig> {
     const rawTs = await readFile(resolve(storeDir, 'store.config.ts'), 'utf8');
     const match = rawTs.match(/^export const storeConfig = ([\s\S]*?) as const;\s*$/);
     if (!match) throw new Error('Nieprawidłowy format store.config.ts.');
-    return JSON.parse(match[1]) as StoreConfig;
+    return parseStoreConfig(JSON.parse(match[1]), slug);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       throw new Error(`Sklep "${slug}" nie posiada konfiguracji.`);
