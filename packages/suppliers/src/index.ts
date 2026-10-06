@@ -4,6 +4,7 @@ export type SupplierProduct = {
   title: string;
   description?: string;
   category?: string;
+  subcategory?: string;
   price: number;
   currency: string;
   available: boolean;
@@ -33,3 +34,5 @@ export { SupplierManager } from "./manager.js";
 export { MockSupplier } from "./mock.js";
 
 export { BigBuySupplier } from './adapters/bigbuy.js';
+export { AllegroSupplier } from './adapters/allegro.js';
+

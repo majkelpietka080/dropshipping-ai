@@ -14,6 +14,7 @@ export class MockSupplier implements SupplierAdapter {
       title: 'Travel Organizer',
       description: 'Compact travel organizer for documents and accessories.',
       category: 'Travel & Organization',
+      subcategory: 'Organizery',
       price: 12.5,
       currency: 'EUR',
       available: true,

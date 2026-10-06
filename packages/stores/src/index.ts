@@ -11,6 +11,16 @@ export type StoreConfig = {
   approvalRequired: boolean;
   niche?: string;
   productCategories?: string[];
+  productSubcategories?: Record<string, string[]>;
+  catalogCoverage?: Record<string, {
+    minimumProducts: number;
+  }>;
+  catalog?: {
+    shopifyVendor?: string;
+    excludeProductTypes?: string[];
+    requiredTags?: string[];
+    requireAvailable?: boolean;
+  };
   brand?: {
     primaryColor?: string;
     secondaryColor?: string;
