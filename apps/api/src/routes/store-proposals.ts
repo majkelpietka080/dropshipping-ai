@@ -5,7 +5,7 @@ import { saveJsonArray } from '../storage.js';
 import { findAvailableStoreSlug, writeStoreConfigFiles } from '../store-files.js';
 
 export type StoreProposalRouteDependencies = {
-  // Owned by app.ts; the same instances are shared with POST /agent/stores/propose.
+  // Owned by app.ts and created once per process.
   storeProposals: Map<string, StoreProposal>;
   storeProposalOperations: InFlightGuard;
 };
@@ -14,6 +14,49 @@ export function registerStoreProposalRoutes(
   app: FastifyInstance,
   { storeProposals, storeProposalOperations }: StoreProposalRouteDependencies
 ) {
+  app.post("/agent/stores/propose", async (request, reply) => {
+    const body = request.body as {
+      name: string;
+      tagline: string;
+      niche: string;
+      productCategories: string[];
+      brand: { primaryColor?: string; secondaryColor?: string; style?: string };
+      aiInfluencer: { enabled: boolean; name?: string; ageRange?: string; personality?: string[] };
+      reason: string;
+    } | undefined;
+
+    if (
+      typeof body?.name !== 'string' || !body.name.trim() ||
+      typeof body.tagline !== 'string' ||
+      typeof body.niche !== 'string' ||
+      !Array.isArray(body.productCategories)
+    ) {
+      return reply.code(400).send({
+        ok: false,
+        error: 'name, tagline, niche i productCategories są wymagane'
+      });
+    }
+
+    // Explicit fields only: the body must not override id, status or createdAt.
+    const proposal: StoreProposal = {
+      id: crypto.randomUUID(),
+      name: body.name,
+      tagline: body.tagline,
+      niche: body.niche,
+      productCategories: body.productCategories,
+      brand: body.brand ?? {},
+      aiInfluencer: body.aiInfluencer ?? { enabled: false },
+      reason: body.reason,
+      status: "pending" as const,
+      createdAt: new Date().toISOString()
+    };
+
+    storeProposals.set(proposal.id, proposal);
+    await saveJsonArray('store-proposals.json', Array.from(storeProposals.values()));
+
+    return reply.code(201).send({ ok: true, proposal });
+  });
+
   app.get("/agent/stores/proposals", async () => {
     return {
       ok: true,
