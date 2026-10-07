@@ -14,6 +14,7 @@ export const PUBLIC_ROUTES = new Set([
   'GET /allegro/oauth/callback',
   'GET /shopify/products',
   'GET /catalog/coverage',
+  'GET /catalog/products',
   'GET /stores/:slug/config',
   'GET /store/config'
 ]);

@@ -101,6 +101,7 @@ const PUBLIC_ROUTES = [
   'GET /allegro/oauth/callback',
   'GET /allegro/oauth/start',
   'GET /catalog/coverage',
+  'GET /catalog/products',
   'GET /health',
   'GET /shopify/products',
   'GET /store/config',
@@ -163,9 +164,9 @@ function setCookieHeader(value: string | string[] | number | undefined): string 
 
 // --- Route inventory and auth ---------------------------------------------------
 
-test('all 27 routes are registered', () => {
+test('all 28 routes are registered', () => {
   assert.deepEqual(registeredRoutes(), [...PUBLIC_ROUTES, ...PROTECTED_ROUTES].sort());
-  assert.equal(registeredRoutes().length, 27);
+  assert.equal(registeredRoutes().length, 28);
 });
 
 test('every non-public route rejects requests without a valid token', async () => {
@@ -218,6 +219,7 @@ test('Shopify routes respond 503 without Shopify configuration', async () => {
   const requests = [
     { method: 'GET' as const, url: '/shopify/products', headers: {} },
     { method: 'GET' as const, url: '/catalog/coverage', headers: {} },
+    { method: 'GET' as const, url: '/catalog/products', headers: {} },
     { method: 'GET' as const, url: '/shopify/scopes', headers: AUTH },
     { method: 'GET' as const, url: '/shopify/test', headers: AUTH },
     { method: 'GET' as const, url: '/shopify/product-diagnostic?productId=1', headers: AUTH },
@@ -250,7 +252,10 @@ test('invalid requests are rejected with 400', async () => {
     { method: 'POST', url: '/agent/customer-needs', payload: { message: 'm', urgency: 'browsing', storeSlug: '../x' } },
     { method: 'POST', url: '/agent/products/abc/fix-catalog' },
     { method: 'GET', url: '/suppliers/search?limit=abc' },
-    { method: 'GET', url: '/agent/products/evaluate?maxPrice=abc' }
+    { method: 'GET', url: '/agent/products/evaluate?maxPrice=abc' },
+    { method: 'GET', url: '/catalog/products?limit=0' },
+    { method: 'GET', url: '/catalog/products?limit=abc' },
+    { method: 'GET', url: '/catalog/products?after=bad%20cursor' }
   ];
 
   for (const { method, url, payload } of cases) {
@@ -380,6 +385,122 @@ test('Allegro OAuth callback rejects invalid state', async () => {
     headers: { cookie: 'allegro_oauth_state=other-value' }
   });
   assert.equal(mismatched.statusCode, 400);
+});
+
+// --- Public catalog -------------------------------------------------------------
+
+const SHOPIFY_ENV = {
+  SHOPIFY_SHOP_DOMAIN: 'catalog-test-shop',
+  SHOPIFY_CLIENT_ID: 'catalog-test-client',
+  SHOPIFY_CLIENT_SECRET: 'catalog-test-secret'
+};
+
+function catalogNode(overrides: Record<string, unknown>) {
+  return {
+    id: 'gid://shopify/Product/1',
+    handle: 'travel-organizer',
+    title: 'Travel Organizer',
+    status: 'ACTIVE',
+    vendor: 'Giovetta Living',
+    productType: 'Organizery',
+    tags: ['giovetta'],
+    images: { nodes: [{ url: 'https://cdn.example/1.jpg', altText: null }] },
+    priceRange: { minVariantPrice: { amount: '49.90', currencyCode: 'PLN' } },
+    variants: { nodes: [{ availableForSale: true }] },
+    ...overrides
+  };
+}
+
+// Serves Shopify's token and GraphQL endpoints from memory; nothing leaves the process.
+async function withFakeShopify(
+  graphql: (body: { query: string; variables: Record<string, unknown> }) => Response,
+  run: (requests: Array<{ query: string; variables: Record<string, unknown> }>) => Promise<void>
+) {
+  const blockedFetch = globalThis.fetch;
+  const previousEnv = Object.fromEntries(Object.keys(SHOPIFY_ENV).map((key) => [key, process.env[key]]));
+  const requests: Array<{ query: string; variables: Record<string, unknown> }> = [];
+
+  Object.assign(process.env, SHOPIFY_ENV);
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    const url = String(input);
+
+    if (url === `https://${SHOPIFY_ENV.SHOPIFY_SHOP_DOMAIN}.myshopify.com/admin/oauth/access_token`) {
+      return new Response(JSON.stringify({ access_token: 'fake-token', expires_in: 3600 }), { status: 200 });
+    }
+
+    if (url.startsWith(`https://${SHOPIFY_ENV.SHOPIFY_SHOP_DOMAIN}.myshopify.com/admin/api/`)) {
+      const body = JSON.parse(String(init?.body));
+      requests.push(body);
+      return graphql(body);
+    }
+
+    throw new Error(`Unexpected request in test: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    await run(requests);
+  } finally {
+    globalThis.fetch = blockedFetch;
+    Object.assign(process.env, previousEnv);
+  }
+}
+
+test('public catalog returns only active Giovetta products with public fields and a cursor', async () => {
+  await withFakeShopify(
+    () => new Response(JSON.stringify({
+      data: {
+        products: {
+          nodes: [
+            catalogNode({}),
+            catalogNode({ id: 'gid://shopify/Product/2', status: 'DRAFT' }),
+            catalogNode({ id: 'gid://shopify/Product/3', vendor: 'Snowboard Co' }),
+            catalogNode({ id: 'gid://shopify/Product/4', tags: [] })
+          ],
+          pageInfo: { hasNextPage: true, endCursor: 'cursor-2' }
+        }
+      }
+    }), { status: 200 }),
+    async (requests) => {
+      const response = await app.inject({ method: 'GET', url: '/catalog/products?limit=2&after=cursor-1' });
+
+      assert.equal(response.statusCode, 200);
+      const body = response.json();
+      assert.equal(body.ok, true);
+      assert.equal(body.nextCursor, 'cursor-2');
+      assert.deepEqual(body.products, [{
+        id: 'gid://shopify/Product/1',
+        handle: 'travel-organizer',
+        title: 'Travel Organizer',
+        price: 49.9,
+        currency: 'PLN',
+        images: [{ url: 'https://cdn.example/1.jpg', altText: null }],
+        available: true,
+        category: 'Travel & Organization',
+        subcategory: 'Organizery'
+      }]);
+      assert.doesNotMatch(response.body, /inventory|vendor|tags|status|DRAFT/i);
+
+      assert.equal(requests.length, 1);
+      assert.deepEqual(requests[0].variables, { first: 2, after: 'cursor-1', query: 'status:active' });
+    }
+  );
+});
+
+test('public catalog reports Shopify failures as a generic 502 without any details', async () => {
+  const failures = [
+    () => new Response(JSON.stringify({ errors: [{ message: 'Throttled: internal-graphql-detail' }] }), { status: 200 }),
+    () => new Response('internal-http-detail', { status: 500 })
+  ];
+
+  for (const failure of failures) {
+    await withFakeShopify(failure, async () => {
+      const response = await app.inject({ method: 'GET', url: '/catalog/products' });
+
+      assert.equal(response.statusCode, 502);
+      assert.deepEqual(response.json(), { ok: false, error: 'Nie udało się pobrać katalogu produktów.' });
+      assert.doesNotMatch(response.body, /internal-|Throttled|GraphQL|HTTP|catalog-test-secret|fake-token/);
+    });
+  }
 });
 
 // --- CORS ---------------------------------------------------------------------
