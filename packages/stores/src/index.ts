@@ -1,3 +1,5 @@
+import { normalizeTaxonomyKey, taxonomySlug } from "./taxonomy.js";
+
 export type StorePricing = {
   targetMarginPercent: number;
   minimumMarginPercent: number;
@@ -358,6 +360,38 @@ export function parseStoreConfig(raw: unknown, slug: string): StoreConfig {
     }
   }
 
+  // Taxonomy names are matched case- and Unicode-insensitively and exposed as
+  // slugs, so names that collide after normalization would be ambiguous.
+  {
+    const names: Array<{ name: string; path: string; kind: string }> = [
+      ...(productCategories ?? []).map((name) => ({ name, path: "productCategories", kind: "kategoria" })),
+      ...Object.entries(productSubcategories ?? {}).flatMap(([category, items]) =>
+        items.map((name) => ({ name, path: `productSubcategories.${category}`, kind: "podkategoria" }))
+      )
+    ];
+    const byKey = new Map<string, { name: string; kind: string }>();
+    const bySlug = new Map<string, { name: string; kind: string }>();
+
+    for (const { name, path, kind } of names) {
+      const key = normalizeTaxonomyKey(name);
+      const slug = taxonomySlug(name);
+      const sameKey = byKey.get(key);
+      const sameSlug = bySlug.get(slug);
+
+      // Exact duplicates are already reported by the list/ownership checks above.
+      if (sameKey && (sameKey.name !== name || sameKey.kind !== kind)) {
+        c.fail(path, `${kind} "${name}" koliduje z: ${sameKey.kind} "${sameKey.name}" (po normalizacji wielkości liter i Unicode)`);
+      } else if (!slug) {
+        c.fail(path, `${kind} "${name}" nie daje poprawnego sluga`);
+      } else if (sameSlug && !sameKey) {
+        c.fail(path, `${kind} "${name}" ma ten sam slug "${slug}" co: ${sameSlug.kind} "${sameSlug.name}"`);
+      }
+
+      if (!sameKey) byKey.set(key, { name, kind });
+      if (slug && !sameSlug) bySlug.set(slug, { name, kind });
+    }
+  }
+
   let catalogCoverage: StoreConfig["catalogCoverage"];
   const coverageRaw = c.object(raw, "catalogCoverage", "catalogCoverage");
 
@@ -484,6 +518,19 @@ function withoutUndefined<T extends object>(value: T): T {
     Object.entries(value).filter(([, entry]) => entry !== undefined)
   ) as T;
 }
+
+export {
+  buildCatalogTaxonomy,
+  classifyProductType,
+  normalizeTaxonomyKey,
+  taxonomySlug
+} from "./taxonomy.js";
+export type {
+  CatalogTaxonomy,
+  ProductClassification,
+  TaxonomyCategory,
+  TaxonomySubcategory
+} from "./taxonomy.js";
 
 // Internal pricing (margins, VAT) must not leave the backend; legacy
 // targetMargin carries the same information, so it is removed too.

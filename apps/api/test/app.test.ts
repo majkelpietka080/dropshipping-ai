@@ -454,7 +454,8 @@ test('public catalog returns only active Giovetta products with public fields an
             catalogNode({}),
             catalogNode({ id: 'gid://shopify/Product/2', status: 'DRAFT' }),
             catalogNode({ id: 'gid://shopify/Product/3', vendor: 'Snowboard Co' }),
-            catalogNode({ id: 'gid://shopify/Product/4', tags: [] })
+            catalogNode({ id: 'gid://shopify/Product/4', tags: [] }),
+            catalogNode({ id: 'gid://shopify/Product/5', productType: 'Car Lifestyle' })
           ],
           pageInfo: { hasNextPage: true, endCursor: 'cursor-2' }
         }
@@ -476,7 +477,9 @@ test('public catalog returns only active Giovetta products with public fields an
         images: [{ url: 'https://cdn.example/1.jpg', altText: null }],
         available: true,
         category: 'Travel & Organization',
-        subcategory: 'Organizery'
+        subcategory: 'Organizery',
+        categorySlug: 'travel-organization',
+        subcategorySlug: 'organizery'
       }]);
       assert.doesNotMatch(response.body, /inventory|vendor|tags|status|DRAFT/i);
 
@@ -501,6 +504,64 @@ test('public catalog reports Shopify failures as a generic 502 without any detai
       assert.doesNotMatch(response.body, /internal-|Throttled|GraphQL|HTTP|catalog-test-secret|fake-token/);
     });
   }
+});
+
+// Same products as Shopify returns them to the existing GET /shopify/products query.
+function legacyProductEdge(id: string, productType: string) {
+  return {
+    node: {
+      id,
+      title: `Product ${id}`,
+      handle: `product-${id}`,
+      vendor: 'Giovetta Living',
+      productType,
+      tags: ['giovetta'],
+      totalInventory: 1,
+      featuredImage: null,
+      images: { nodes: [] },
+      priceRange: { minVariantPrice: { amount: '10.00', currencyCode: 'PLN' } },
+      variants: { nodes: [{ id: `v-${id}`, title: 'Default', price: '10.00', compareAtPrice: null, availableForSale: true, inventoryQuantity: 1 }] }
+    }
+  };
+}
+
+test('catalog coverage uses the shared classification and reports unclassified product types', async () => {
+  const edges = [
+    legacyProductEdge('1', 'Organizery'),
+    legacyProductEdge('2', ' ORGANIZERY '),
+    legacyProductEdge('3', 'Biżuteria'.normalize('NFD')),
+    legacyProductEdge('4', 'Travel & Organization'),
+    legacyProductEdge('5', 'Car Lifestyle'),
+    legacyProductEdge('6', 'Car Lifestyle'),
+    legacyProductEdge('7', '')
+  ];
+
+  await withFakeShopify(
+    () => new Response(JSON.stringify({ data: { products: { edges, pageInfo: { hasNextPage: false } } } }), { status: 200 }),
+    async () => {
+      const response = await app.inject({ method: 'GET', url: '/catalog/coverage' });
+
+      assert.equal(response.statusCode, 200);
+      const body = response.json();
+      assert.equal(body.productsCount, 7);
+      assert.deepEqual(body.productsBySubcategory, { Organizery: 2, 'Biżuteria': 1 });
+      assert.equal(body.coverage.find((entry: { subcategory: string }) => entry.subcategory === 'Organizery').availableProducts, 2);
+      assert.equal(body.categoryOnlyCount, 1);
+      assert.equal(body.unclassifiedCount, 3);
+      assert.deepEqual(body.unknownProductTypes, [
+        { productType: 'Car Lifestyle', count: 2 },
+        { productType: '', count: 1 }
+      ]);
+
+      // GET /shopify/products itself is unchanged: raw productType, no classification fields.
+      const raw = await app.inject({ method: 'GET', url: '/shopify/products' });
+      assert.equal(raw.statusCode, 200);
+      const rawProducts = raw.json().products;
+      assert.deepEqual(rawProducts.map((product: { productType: string }) => product.productType), edges.map((edge) => edge.node.productType));
+      assert.ok(rawProducts.every((product: Record<string, unknown>) => !('categorySlug' in product) && !('category' in product)));
+      assert.ok(rawProducts.every((product: { totalInventory?: number }) => product.totalInventory === 1));
+    }
+  );
 });
 
 // --- CORS ---------------------------------------------------------------------

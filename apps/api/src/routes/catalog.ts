@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { countProductsBySubcategory, evaluateCatalogCoverage } from '@dropshipping/product-scout';
+import { buildCatalogTaxonomy, classifyProductType } from '@dropshipping/stores';
 import { loadStoreConfig } from '../store-files.js';
 import { getShopifyConfig } from '../shopify-config.js';
 import { sendStoreConfigError } from '../http-helpers.js';
@@ -53,21 +54,38 @@ export function registerCatalogRoutes(
         products: Array<{ productType?: string; title?: string }>;
       };
 
-      const products = shopifyData.products.map((product) => ({
-        subcategory: product.productType
+      // Same classification as GET /catalog/products: subcategory → category → none.
+      const taxonomy = buildCatalogTaxonomy(store);
+      const classified = shopifyData.products.map((product) => ({
+        productType: product.productType ?? '',
+        classification: classifyProductType(product.productType, taxonomy)
       }));
 
-      const productsBySubcategory = countProductsBySubcategory(products);
+      const productsBySubcategory = countProductsBySubcategory(
+        classified.map(({ classification }) => ({ subcategory: classification.subcategory ?? undefined }))
+      );
       const coverage = evaluateCatalogCoverage(
         store.catalogCoverage,
         productsBySubcategory
       );
 
+      const unknownCounts = new Map<string, number>();
+
+      for (const { productType, classification } of classified) {
+        if (classification.matchedBy === 'none') {
+          unknownCounts.set(productType, (unknownCounts.get(productType) ?? 0) + 1);
+        }
+      }
+
       return {
         ok: true,
-        productsCount: products.length,
+        productsCount: classified.length,
         productsBySubcategory,
-        coverage
+        coverage,
+        categoryOnlyCount: classified.filter(({ classification }) => classification.matchedBy === 'category').length,
+        unclassifiedCount: classified.filter(({ classification }) => classification.matchedBy === 'none').length,
+        unknownProductTypes: Array.from(unknownCounts, ([productType, count]) => ({ productType, count }))
+          .sort((a, b) => b.count - a.count || a.productType.localeCompare(b.productType))
       };
     } catch (error) {
       _request.log.error(error);

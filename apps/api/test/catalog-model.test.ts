@@ -61,6 +61,7 @@ test('category is derived from productSubcategories in the store config', () => 
   assert.deepEqual(resolveCategory('Organizery', giovetta), { category: 'Travel & Organization', subcategory: 'Organizery' });
   assert.deepEqual(resolveCategory('bielizna', giovetta), { category: 'Fashion & Accessories', subcategory: 'Bielizna' });
   assert.deepEqual(resolveCategory('Travel & Organization', giovetta), { category: 'Travel & Organization', subcategory: null });
+  assert.deepEqual(resolveCategory('  ODZIEŻ DAMSKA '.normalize('NFD'), giovetta), { category: 'Fashion & Accessories', subcategory: 'Odzież damska' });
   assert.deepEqual(resolveCategory('Unknown type', giovetta), { category: null, subcategory: null });
   assert.deepEqual(resolveCategory('', giovetta), { category: null, subcategory: null });
 });
@@ -69,7 +70,7 @@ test('public product exposes only the allowed fields', () => {
   const product = toCatalogProduct(node(), giovetta);
 
   assert.deepEqual(Object.keys(product).sort(), [
-    'available', 'category', 'currency', 'handle', 'id', 'images', 'price', 'subcategory', 'title'
+    'available', 'category', 'categorySlug', 'currency', 'handle', 'id', 'images', 'price', 'subcategory', 'subcategorySlug', 'title'
   ]);
   assert.deepEqual(product, {
     id: 'gid://shopify/Product/1',
@@ -80,19 +81,35 @@ test('public product exposes only the allowed fields', () => {
     images: [{ url: 'https://cdn.example/1.jpg', altText: 'Organizer' }],
     available: true,
     category: 'Travel & Organization',
-    subcategory: 'Organizery'
+    subcategory: 'Organizery',
+    categorySlug: 'travel-organization',
+    subcategorySlug: 'organizery'
   });
+
+  const categoryOnly = toCatalogProduct(node({ productType: 'Travel & Organization' }), giovetta);
+  assert.equal(categoryOnly.category, 'Travel & Organization');
+  assert.equal(categoryOnly.categorySlug, 'travel-organization');
+  assert.equal(categoryOnly.subcategory, null);
+  assert.equal(categoryOnly.subcategorySlug, null);
 });
 
 test('a page drops filtered products and exposes the next cursor', () => {
   const page = toCatalogPage({
     products: {
-      nodes: [node(), node({ id: 'draft', status: 'DRAFT' }), node({ id: 'foreign', vendor: 'Other' })],
+      nodes: [
+        node(),
+        node({ id: 'draft', status: 'DRAFT' }),
+        node({ id: 'foreign', vendor: 'Other' }),
+        node({ id: 'unclassified', productType: 'Car Lifestyle' }),
+        node({ id: 'no-type', productType: '' }),
+        node({ id: 'category-only', productType: 'Lifestyle' })
+      ],
       pageInfo: { hasNextPage: true, endCursor: 'cursor-2' }
     }
   }, giovetta);
 
-  assert.deepEqual(page.products.map((product) => product.id), ['gid://shopify/Product/1']);
+  // Unclassified products are left out of the public catalog; category-only ones stay.
+  assert.deepEqual(page.products.map((product) => product.id), ['gid://shopify/Product/1', 'category-only']);
   assert.equal(page.nextCursor, 'cursor-2');
 
   const last = toCatalogPage({

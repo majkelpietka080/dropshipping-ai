@@ -1,4 +1,9 @@
-import type { StoreConfig } from '@dropshipping/stores';
+import {
+  buildCatalogTaxonomy,
+  classifyProductType,
+  type CatalogTaxonomy,
+  type StoreConfig
+} from '@dropshipping/stores';
 
 // Public, read-only catalog model for GET /catalog/products. Only fields that
 // are safe to expose leave this module (no inventory, vendor, tags or status).
@@ -79,6 +84,9 @@ export type CatalogProduct = {
   available: boolean;
   category: string | null;
   subcategory: string | null;
+  // Catalog/filter/URL identifiers derived from the store config; never written to Shopify.
+  categorySlug: string | null;
+  subcategorySlug: string | null;
 };
 
 export type CatalogPage = {
@@ -152,32 +160,19 @@ export function matchesCatalogFilters(node: ShopifyCatalogNode, store: StoreConf
   return true;
 }
 
-// productType holds the Giovetta subcategory; a category name or an unknown
-// type still yields a product, just without the missing level.
+// productType holds the Giovetta subcategory; a category name still yields a
+// product without a subcategory. Matching is exact: subcategory → category → none.
 export function resolveCategory(
   productType: string,
   store: StoreConfig
 ): { category: string | null; subcategory: string | null } {
-  const type = productType.trim().toLowerCase();
-
-  if (!type) {
-    return { category: null, subcategory: null };
-  }
-
-  for (const [category, subcategories] of Object.entries(store.productSubcategories ?? {})) {
-    const subcategory = subcategories.find((item) => item.toLowerCase() === type);
-
-    if (subcategory) {
-      return { category, subcategory };
-    }
-  }
-
-  const category = store.productCategories?.find((item) => item.toLowerCase() === type);
-
-  return { category: category ?? null, subcategory: null };
+  const { category, subcategory } = classifyProductType(productType, buildCatalogTaxonomy(store));
+  return { category, subcategory };
 }
 
-export function toCatalogProduct(node: ShopifyCatalogNode, store: StoreConfig): CatalogProduct {
+function toPublicProduct(node: ShopifyCatalogNode, taxonomy: CatalogTaxonomy): CatalogProduct {
+  const classification = classifyProductType(node.productType, taxonomy);
+
   return {
     id: node.id,
     handle: node.handle,
@@ -186,19 +181,30 @@ export function toCatalogProduct(node: ShopifyCatalogNode, store: StoreConfig): 
     currency: node.priceRange.minVariantPrice.currencyCode,
     images: node.images.nodes.map(({ url, altText }) => ({ url, altText })),
     available: isAvailable(node),
-    ...resolveCategory(node.productType, store)
+    category: classification.category,
+    subcategory: classification.subcategory,
+    categorySlug: classification.categorySlug,
+    subcategorySlug: classification.subcategorySlug
   };
+}
+
+export function toCatalogProduct(node: ShopifyCatalogNode, store: StoreConfig): CatalogProduct {
+  return toPublicProduct(node, buildCatalogTaxonomy(store));
 }
 
 // Filtering happens after Shopify paginates, so a page can hold fewer than
 // `first` products; clients keep following nextCursor until it is null.
+// Products whose productType matches no category are left out of the public
+// catalog; /catalog/coverage reports them.
 export function toCatalogPage(data: ShopifyCatalogPage, store: StoreConfig): CatalogPage {
   const { nodes, pageInfo } = data.products;
+  const taxonomy = buildCatalogTaxonomy(store);
 
   return {
     products: nodes
       .filter((node) => matchesCatalogFilters(node, store))
-      .map((node) => toCatalogProduct(node, store)),
+      .filter((node) => classifyProductType(node.productType, taxonomy).matchedBy !== 'none')
+      .map((node) => toPublicProduct(node, taxonomy)),
     nextCursor: pageInfo.hasNextPage ? pageInfo.endCursor : null
   };
 }
