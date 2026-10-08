@@ -714,30 +714,71 @@ test('product detail reports Shopify failures as a generic 502 without any detai
 
 // --- Storefront cart --------------------------------------------------------------
 
+// Same shop for the Admin API (variant validation) and the Storefront API (cartCreate).
 const STOREFRONT_ENV = {
   SHOPIFY_SHOP_DOMAIN: 'cart-test-shop',
-  SHOPIFY_STOREFRONT_ACCESS_TOKEN: 'cart-test-storefront-token'
+  SHOPIFY_STOREFRONT_ACCESS_TOKEN: 'cart-test-storefront-token',
+  SHOPIFY_CLIENT_ID: 'cart-test-client',
+  SHOPIFY_CLIENT_SECRET: 'cart-test-client-secret'
 };
 
 const VALID_CART_LINES = [{ merchandiseId: 'gid://shopify/ProductVariant/11', quantity: 2 }];
 const CART_ERROR = { ok: false, error: 'Nie udało się utworzyć koszyka Shopify.' };
+const UNAVAILABLE_VARIANT = { ok: false, error: 'Wybrany wariant jest niedostępny.' };
 
 type StorefrontRequest = { url: string; token: string | null; body: { query: string; variables: Record<string, unknown> } };
+type AdminRequest = { query: string; variables: Record<string, unknown> };
 
-// Serves the Storefront API GraphQL endpoint from memory; nothing leaves the process.
+function cartVariant(id: string, productOverrides: Record<string, unknown> = {}, availableForSale = true) {
+  return { id, availableForSale, product: catalogNode(productOverrides) };
+}
+
+const CART_VARIANTS: Record<string, unknown> = {
+  'gid://shopify/ProductVariant/11': cartVariant('gid://shopify/ProductVariant/11'),
+  'gid://shopify/ProductVariant/21': cartVariant('gid://shopify/ProductVariant/21', { id: 'gid://shopify/Product/2', handle: 'second' }),
+  'gid://shopify/ProductVariant/31': cartVariant('gid://shopify/ProductVariant/31', { status: 'DRAFT' }),
+  'gid://shopify/ProductVariant/32': cartVariant('gid://shopify/ProductVariant/32', { vendor: 'Snowboard Co' }),
+  'gid://shopify/ProductVariant/33': cartVariant('gid://shopify/ProductVariant/33', { tags: [] }),
+  'gid://shopify/ProductVariant/34': cartVariant('gid://shopify/ProductVariant/34', { productType: 'Car Lifestyle' }),
+  'gid://shopify/ProductVariant/35': cartVariant('gid://shopify/ProductVariant/35', {}, false)
+};
+
+// Answers the Admin API nodes(ids:) query from a fixed set of variants; unknown IDs are null.
+function cartVariantsAdmin(variants: Record<string, unknown>) {
+  return (body: AdminRequest) => {
+    const ids = body.variables.ids as string[];
+    return new Response(JSON.stringify({ data: { nodes: ids.map((id) => variants[id] ?? null) } }), { status: 200 });
+  };
+}
+
+// Serves the Admin API (token + GraphQL) and the Storefront API from memory;
+// nothing leaves the process.
 async function withFakeStorefront(
   respond: () => Response,
-  run: (requests: StorefrontRequest[]) => Promise<void>
+  run: (requests: StorefrontRequest[], adminRequests: AdminRequest[]) => Promise<void>,
+  admin: (body: AdminRequest) => Response = cartVariantsAdmin(CART_VARIANTS)
 ) {
   const blockedFetch = globalThis.fetch;
   const previousEnv = Object.fromEntries(Object.keys(STOREFRONT_ENV).map((key) => [key, process.env[key]]));
   const requests: StorefrontRequest[] = [];
+  const adminRequests: AdminRequest[] = [];
+  const shop = `https://${STOREFRONT_ENV.SHOPIFY_SHOP_DOMAIN}.myshopify.com`;
 
   Object.assign(process.env, STOREFRONT_ENV);
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     const url = String(input);
 
-    if (url.startsWith(`https://${STOREFRONT_ENV.SHOPIFY_SHOP_DOMAIN}.myshopify.com/api/`)) {
+    if (url === `${shop}/admin/oauth/access_token`) {
+      return new Response(JSON.stringify({ access_token: 'cart-admin-token', expires_in: 3600 }), { status: 200 });
+    }
+
+    if (url.startsWith(`${shop}/admin/api/`)) {
+      const body = JSON.parse(String(init?.body));
+      adminRequests.push(body);
+      return admin(body);
+    }
+
+    if (url.startsWith(`${shop}/api/`)) {
       requests.push({
         url,
         token: new Headers(init?.headers).get('X-Shopify-Storefront-Access-Token'),
@@ -750,42 +791,52 @@ async function withFakeStorefront(
   }) as typeof fetch;
 
   try {
-    await run(requests);
+    await run(requests, adminRequests);
   } finally {
     globalThis.fetch = blockedFetch;
     Object.assign(process.env, previousEnv);
   }
 }
 
+const successfulCart = () => new Response(JSON.stringify({
+  data: {
+    cartCreate: {
+      cart: { id: 'gid://shopify/Cart/abc123', checkoutUrl: 'https://cart-test-shop.myshopify.com/cart/c/abc123' },
+      userErrors: [],
+      warnings: []
+    }
+  }
+}), { status: 200 });
+
 test('storefront cart rejects invalid lines with 400 before calling Shopify', async () => {
+  const line = (id: number, quantity = 1) => ({ merchandiseId: `gid://shopify/ProductVariant/${id}`, quantity });
   const invalidBodies: unknown[] = [
     {},
     { lines: [] },
     { lines: 'not-an-array' },
-    { lines: Array.from({ length: 101 }, () => VALID_CART_LINES[0]) },
+    { lines: Array.from({ length: 11 }, (_, index) => line(index + 100)) },
     { lines: ['not-an-object'] },
     { lines: [{ merchandiseId: '123', quantity: 1 }] },
     { lines: [{ merchandiseId: 'gid://shopify/Product/1', quantity: 1 }] },
-    { lines: [{ merchandiseId: 'gid://shopify/ProductVariant/11', quantity: 0 }] },
-    { lines: [{ merchandiseId: 'gid://shopify/ProductVariant/11', quantity: 1.5 }] },
-    { lines: [{ merchandiseId: 'gid://shopify/ProductVariant/11', quantity: 100 }] },
-    { lines: [{ merchandiseId: 'gid://shopify/ProductVariant/11', quantity: '2' }] }
+    { lines: [line(11, 0)] },
+    { lines: [line(11, 1.5)] },
+    { lines: [line(11, 11)] },
+    { lines: [{ merchandiseId: 'gid://shopify/ProductVariant/11', quantity: '2' }] },
+    { lines: [line(11, 1), line(11, 2)] }
   ];
 
-  await withFakeStorefront(
-    () => new Response(JSON.stringify({}), { status: 200 }),
-    async (requests) => {
-      for (const payload of invalidBodies) {
-        const response = await app.inject({ method: 'POST', url: '/storefront/cart', payload: payload as Record<string, unknown> });
+  await withFakeStorefront(successfulCart, async (requests, adminRequests) => {
+    for (const payload of invalidBodies) {
+      const response = await app.inject({ method: 'POST', url: '/storefront/cart', payload: payload as Record<string, unknown> });
 
-        assert.equal(response.statusCode, 400, JSON.stringify(payload).slice(0, 80));
-        assert.equal(response.json().ok, false);
-        assert.equal(typeof response.json().error, 'string');
-      }
-
-      assert.equal(requests.length, 0);
+      assert.equal(response.statusCode, 400, JSON.stringify(payload).slice(0, 80));
+      assert.equal(response.json().ok, false);
+      assert.equal(typeof response.json().error, 'string');
     }
-  );
+
+    assert.equal(adminRequests.length, 0);
+    assert.equal(requests.length, 0);
+  });
 });
 
 test('storefront cart responds 503 without Storefront API configuration', async () => {
@@ -793,6 +844,70 @@ test('storefront cart responds 503 without Storefront API configuration', async 
 
   assert.equal(response.statusCode, 503);
   assert.deepEqual(response.json(), { ok: false, error: 'Brakuje konfiguracji Shopify Storefront API w .env' });
+});
+
+test('storefront cart responds 503 without Admin API configuration for variant validation', async () => {
+  await withFakeStorefront(successfulCart, async (requests, adminRequests) => {
+    const clientId = process.env.SHOPIFY_CLIENT_ID;
+    process.env.SHOPIFY_CLIENT_ID = '';
+
+    try {
+      const response = await app.inject({ method: 'POST', url: '/storefront/cart', payload: { lines: VALID_CART_LINES } });
+
+      assert.equal(response.statusCode, 503);
+      assert.deepEqual(response.json(), { ok: false, error: 'Brakuje konfiguracji Shopify w .env' });
+      assert.equal(adminRequests.length, 0);
+      assert.equal(requests.length, 0);
+    } finally {
+      process.env.SHOPIFY_CLIENT_ID = clientId;
+    }
+  });
+});
+
+test('storefront cart rejects variants outside the public Giovetta catalog without creating a cart', async () => {
+  const cases = [
+    'gid://shopify/ProductVariant/31', // DRAFT product
+    'gid://shopify/ProductVariant/32', // wrong vendor
+    'gid://shopify/ProductVariant/33', // missing required tag
+    'gid://shopify/ProductVariant/34', // product not classified into the taxonomy
+    'gid://shopify/ProductVariant/35', // variant not available for sale
+    'gid://shopify/ProductVariant/99'  // variant does not exist
+  ];
+
+  await withFakeStorefront(successfulCart, async (requests, adminRequests) => {
+    for (const merchandiseId of cases) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/storefront/cart',
+        payload: { lines: [VALID_CART_LINES[0], { merchandiseId, quantity: 1 }] }
+      });
+
+      assert.equal(response.statusCode, 400, merchandiseId);
+      assert.deepEqual(response.json(), UNAVAILABLE_VARIANT, merchandiseId);
+      assert.doesNotMatch(response.body, /DRAFT|Snowboard|Car Lifestyle/, merchandiseId);
+    }
+
+    assert.equal(adminRequests.length, cases.length);
+    assert.equal(requests.length, 0);
+  });
+});
+
+test('storefront cart reports Admin API validation failures as a generic 502 without any details', async () => {
+  const failures = [
+    () => new Response(JSON.stringify({ errors: [{ message: 'internal-admin-graphql-detail' }] }), { status: 200 }),
+    () => new Response('internal-admin-http-detail', { status: 500 })
+  ];
+
+  for (const failure of failures) {
+    await withFakeStorefront(successfulCart, async (requests) => {
+      const response = await app.inject({ method: 'POST', url: '/storefront/cart', payload: { lines: VALID_CART_LINES } });
+
+      assert.equal(response.statusCode, 502);
+      assert.deepEqual(response.json(), CART_ERROR);
+      assert.doesNotMatch(response.body, /internal-|GraphQL|HTTP|cart-admin-token|cart-test-client-secret/);
+      assert.equal(requests.length, 0);
+    }, failure);
+  }
 });
 
 test('storefront cart reports Shopify failures as a generic 502 without any details', async () => {
@@ -816,34 +931,35 @@ test('storefront cart reports Shopify failures as a generic 502 without any deta
   }
 });
 
-test('storefront cart creates a Shopify cart and returns the checkout URL', async () => {
-  await withFakeStorefront(
-    () => new Response(JSON.stringify({
-      data: {
-        cartCreate: {
-          cart: { id: 'gid://shopify/Cart/abc123', checkoutUrl: 'https://cart-test-shop.myshopify.com/cart/c/abc123' },
-          userErrors: [],
-          warnings: []
-        }
-      }
-    }), { status: 200 }),
-    async (requests) => {
-      const response = await app.inject({ method: 'POST', url: '/storefront/cart', payload: { lines: VALID_CART_LINES } });
+test('storefront cart validates variants in the Admin API and then creates the cart with the same lines', async () => {
+  const lines = [
+    { merchandiseId: 'gid://shopify/ProductVariant/11', quantity: 2 },
+    { merchandiseId: 'gid://shopify/ProductVariant/21', quantity: 10 }
+  ];
 
-      assert.equal(response.statusCode, 200);
-      assert.deepEqual(response.json(), {
-        ok: true,
-        cartId: 'gid://shopify/Cart/abc123',
-        checkoutUrl: 'https://cart-test-shop.myshopify.com/cart/c/abc123'
-      });
+  await withFakeStorefront(successfulCart, async (requests, adminRequests) => {
+    const response = await app.inject({ method: 'POST', url: '/storefront/cart', payload: { lines } });
 
-      assert.equal(requests.length, 1);
-      assert.match(requests[0].url, /^https:\/\/cart-test-shop\.myshopify\.com\/api\/[^/]+\/graphql\.json$/);
-      assert.equal(requests[0].token, 'cart-test-storefront-token');
-      assert.match(requests[0].body.query, /cartCreate/);
-      assert.deepEqual(requests[0].body.variables, { input: { lines: VALID_CART_LINES } });
-    }
-  );
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json(), {
+      ok: true,
+      cartId: 'gid://shopify/Cart/abc123',
+      checkoutUrl: 'https://cart-test-shop.myshopify.com/cart/c/abc123'
+    });
+
+    // One Admin API validation query for all lines, IDs passed as a variable.
+    assert.equal(adminRequests.length, 1);
+    assert.match(adminRequests[0].query, /nodes\(ids: \$ids\)/);
+    assert.match(adminRequests[0].query, /\.\.\. on ProductVariant/);
+    assert.deepEqual(adminRequests[0].variables, { ids: lines.map((line) => line.merchandiseId) });
+
+    // Then exactly one Storefront API cartCreate with the very same lines.
+    assert.equal(requests.length, 1);
+    assert.match(requests[0].url, /^https:\/\/cart-test-shop\.myshopify\.com\/api\/[^/]+\/graphql\.json$/);
+    assert.equal(requests[0].token, 'cart-test-storefront-token');
+    assert.match(requests[0].body.query, /cartCreate/);
+    assert.deepEqual(requests[0].body.variables, { input: { lines } });
+  });
 });
 
 // --- CORS ---------------------------------------------------------------------

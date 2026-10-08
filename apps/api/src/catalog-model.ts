@@ -73,6 +73,21 @@ export const CATALOG_PRODUCT_QUERY = `
   }
 `;
 
+// Cart validation: every variant with its product, so the product can be checked
+// against the same public-catalog rules. IDs are passed as a GraphQL variable.
+export const CATALOG_CART_VARIANTS_QUERY = `
+  query catalogCartVariants($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      ... on ProductVariant {
+        id
+        availableForSale
+        product {${CATALOG_PRODUCT_FIELDS}
+        }
+      }
+    }
+  }
+`;
+
 export type ShopifyCatalogNode = {
   id: string;
   handle: string;
@@ -103,6 +118,17 @@ export type ShopifyCatalogPage = {
 
 export type ShopifyCatalogProductResult = {
   productByIdentifier: ShopifyCatalogNode | null;
+};
+
+// Non-variant or unknown IDs come back as null or an object without these fields.
+export type ShopifyCartVariant = {
+  id?: string;
+  availableForSale?: boolean;
+  product?: ShopifyCatalogNode | null;
+};
+
+export type ShopifyCartVariantsResult = {
+  nodes: Array<ShopifyCartVariant | null>;
 };
 
 // Variant data needed to pick a size/colour and add it to a cart; no inventory.
@@ -272,6 +298,19 @@ export function toCatalogProductDetail(
   }
 
   return toPublicProduct(node, taxonomy);
+}
+
+// A variant can be bought only if its product is in the public Giovetta catalog
+// (same filters and classification as the catalog endpoints) and it is available.
+export function isPurchasableCatalogVariant(
+  variant: ShopifyCartVariant | null | undefined,
+  store: StoreConfig
+): boolean {
+  if (!variant || typeof variant.id !== 'string' || variant.availableForSale !== true) {
+    return false;
+  }
+
+  return toCatalogProductDetail(variant.product ?? null, store) !== null;
 }
 
 // Filtering happens after Shopify paginates, so a page can hold fewer than

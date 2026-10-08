@@ -1,9 +1,25 @@
 import type { FastifyInstance } from 'fastify';
-import { createShopifyCart, type StorefrontCartLine } from '@dropshipping/shopify';
-import { getShopifyStorefrontConfig } from '../shopify-config.js';
+import { createShopifyCart, createShopifyClient, type StorefrontCartLine } from '@dropshipping/shopify';
+import { getShopifyConfig, getShopifyStorefrontConfig } from '../shopify-config.js';
+import { loadStoreConfig } from '../store-files.js';
+import { sendStoreConfigError } from '../http-helpers.js';
+import {
+  CATALOG_CART_VARIANTS_QUERY,
+  isPurchasableCatalogVariant,
+  type ShopifyCartVariant,
+  type ShopifyCartVariantsResult
+} from '../catalog-model.js';
 
-const MAX_LINES = 100;
-const MAX_QUANTITY = 99;
+const MAX_LINES = 10;
+const MAX_QUANTITY = 10;
+
+const CART_ERROR = 'Nie udało się utworzyć koszyka Shopify.';
+const UNAVAILABLE_VARIANT_ERROR = 'Wybrany wariant jest niedostępny.';
+
+export type StorefrontRouteDependencies = {
+  // Resolved by app.ts after .env is loaded.
+  defaultStoreSlug: string;
+};
 
 function parseLines(value: unknown): { ok: true; lines: StorefrontCartLine[] } | { ok: false; error: string } {
   if (!Array.isArray(value) || value.length < 1 || value.length > MAX_LINES) {
@@ -11,6 +27,7 @@ function parseLines(value: unknown): { ok: true; lines: StorefrontCartLine[] } |
   }
 
   const lines: StorefrontCartLine[] = [];
+  const seen = new Set<string>();
 
   for (const item of value) {
     if (!item || typeof item !== 'object') {
@@ -27,6 +44,12 @@ function parseLines(value: unknown): { ok: true; lines: StorefrontCartLine[] } |
       return { ok: false, error: 'Nieprawidłowy merchandiseId.' };
     }
 
+    if (seen.has(merchandiseId)) {
+      return { ok: false, error: 'Każdy wariant może wystąpić w koszyku tylko raz.' };
+    }
+
+    seen.add(merchandiseId);
+
     if (
       typeof quantity !== 'number' ||
       !Number.isInteger(quantity) ||
@@ -42,7 +65,10 @@ function parseLines(value: unknown): { ok: true; lines: StorefrontCartLine[] } |
   return { ok: true, lines };
 }
 
-export function registerStorefrontRoutes(app: FastifyInstance) {
+export function registerStorefrontRoutes(
+  app: FastifyInstance,
+  { defaultStoreSlug }: StorefrontRouteDependencies
+) {
   app.post('/storefront/cart', async (request, reply) => {
     const parsed = parseLines((request.body as { lines?: unknown } | null)?.lines);
 
@@ -59,6 +85,44 @@ export function registerStorefrontRoutes(app: FastifyInstance) {
       });
     }
 
+    // Only variants of products in the public Giovetta catalog may be bought.
+    const adminConfig = getShopifyConfig();
+
+    if (!adminConfig) {
+      return reply.code(503).send({ ok: false, error: 'Brakuje konfiguracji Shopify w .env' });
+    }
+
+    let store: Awaited<ReturnType<typeof loadStoreConfig>>;
+
+    try {
+      store = await loadStoreConfig(defaultStoreSlug);
+    } catch (error) {
+      return sendStoreConfigError(request, reply, error, 'Nie udało się wczytać konfiguracji sklepu');
+    }
+
+    let variants: Map<string, ShopifyCartVariant>;
+
+    try {
+      const data = await createShopifyClient(adminConfig).query<ShopifyCartVariantsResult>(
+        CATALOG_CART_VARIANTS_QUERY,
+        { ids: parsed.lines.map((line) => line.merchandiseId) }
+      );
+
+      variants = new Map(
+        data.nodes
+          .filter((node): node is ShopifyCartVariant & { id: string } => typeof node?.id === 'string')
+          .map((node) => [node.id, node])
+      );
+    } catch (error) {
+      // Public endpoint: Shopify/GraphQL details stay in the server log only.
+      request.log.error(error);
+      return reply.code(502).send({ ok: false, error: CART_ERROR });
+    }
+
+    if (!parsed.lines.every((line) => isPurchasableCatalogVariant(variants.get(line.merchandiseId), store))) {
+      return reply.code(400).send({ ok: false, error: UNAVAILABLE_VARIANT_ERROR });
+    }
+
     try {
       const cart = await createShopifyCart(config, parsed.lines);
 
@@ -71,7 +135,7 @@ export function registerStorefrontRoutes(app: FastifyInstance) {
       request.log.error(error);
       return reply.code(502).send({
         ok: false,
-        error: 'Nie udało się utworzyć koszyka Shopify.'
+        error: CART_ERROR
       });
     }
   });

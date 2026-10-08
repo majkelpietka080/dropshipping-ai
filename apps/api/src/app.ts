@@ -88,7 +88,7 @@ registerAiRoutes(app);
 registerShopifyRoutes(app, { defaultStoreSlug: DEFAULT_STORE_SLUG });
 
 registerCatalogRoutes(app, { defaultStoreSlug: DEFAULT_STORE_SLUG });
-registerStorefrontRoutes(app);
+registerStorefrontRoutes(app, { defaultStoreSlug: DEFAULT_STORE_SLUG });
 
 const storeProposals = new Map<string, StoreProposal>(
   (await loadJsonArray<StoreProposal>('store-proposals.json')).map((item) => [item.id, item])
