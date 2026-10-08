@@ -103,6 +103,7 @@ const PUBLIC_ROUTES = [
   'GET /allegro/oauth/start',
   'GET /catalog/coverage',
   'GET /catalog/products',
+  'GET /catalog/products/:handle',
   'GET /health',
   'GET /shopify/products',
   'GET /store/config',
@@ -166,9 +167,9 @@ function setCookieHeader(value: string | string[] | number | undefined): string 
 
 // --- Route inventory and auth ---------------------------------------------------
 
-test('all 29 routes are registered', () => {
+test('all 30 routes are registered', () => {
   assert.deepEqual(registeredRoutes(), [...PUBLIC_ROUTES, ...PROTECTED_ROUTES].sort());
-  assert.equal(registeredRoutes().length, 29);
+  assert.equal(registeredRoutes().length, 30);
 });
 
 test('every non-public route rejects requests without a valid token', async () => {
@@ -222,6 +223,7 @@ test('Shopify routes respond 503 without Shopify configuration', async () => {
     { method: 'GET' as const, url: '/shopify/products', headers: {} },
     { method: 'GET' as const, url: '/catalog/coverage', headers: {} },
     { method: 'GET' as const, url: '/catalog/products', headers: {} },
+    { method: 'GET' as const, url: '/catalog/products/travel-organizer', headers: {} },
     { method: 'GET' as const, url: '/shopify/scopes', headers: AUTH },
     { method: 'GET' as const, url: '/shopify/test', headers: AUTH },
     { method: 'GET' as const, url: '/shopify/product-diagnostic?productId=1', headers: AUTH },
@@ -580,6 +582,134 @@ test('catalog coverage uses the shared classification and reports unclassified p
       assert.ok(rawProducts.every((product: { totalInventory?: number }) => product.totalInventory === 1));
     }
   );
+});
+
+// --- Public product detail --------------------------------------------------------
+
+const PRODUCT_DETAIL_ERROR = { ok: false, error: 'Nie udało się pobrać produktu.' };
+
+// Answers productByIdentifier from a fixed set of products keyed by handle.
+function productDetailShopify(products: Record<string, Record<string, unknown>>) {
+  return (body: { query: string; variables: Record<string, unknown> }) => {
+    const handle = String(body.variables.handle);
+    return new Response(JSON.stringify({ data: { productByIdentifier: products[handle] ?? null } }), { status: 200 });
+  };
+}
+
+const DETAIL_PRODUCTS = {
+  'travel-organizer': catalogNode({ handle: 'travel-organizer' }),
+  'draft-organizer': catalogNode({ handle: 'draft-organizer', status: 'DRAFT' }),
+  'foreign-organizer': catalogNode({ handle: 'foreign-organizer', vendor: 'Snowboard Co' }),
+  'untagged-organizer': catalogNode({ handle: 'untagged-organizer', tags: [] }),
+  'sold-out-organizer': catalogNode({
+    handle: 'sold-out-organizer',
+    variants: { nodes: [{ id: 'gid://shopify/ProductVariant/12', title: 'Default Title', price: '49.90', availableForSale: false, selectedOptions: [] }] }
+  }),
+  'car-lifestyle-thing': catalogNode({ handle: 'car-lifestyle-thing', productType: 'Car Lifestyle' })
+};
+
+test('product detail returns one public Giovetta product with variants and no internal fields', async () => {
+  await withFakeShopify(productDetailShopify(DETAIL_PRODUCTS), async (requests) => {
+    const response = await app.inject({ method: 'GET', url: '/catalog/products/travel-organizer' });
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json(), {
+      ok: true,
+      product: {
+        id: 'gid://shopify/Product/1',
+        handle: 'travel-organizer',
+        title: 'Travel Organizer',
+        price: 49.9,
+        currency: 'PLN',
+        images: [{ url: 'https://cdn.example/1.jpg', altText: null }],
+        available: true,
+        category: 'Travel & Organization',
+        subcategory: 'Organizery',
+        categorySlug: 'travel-organization',
+        subcategorySlug: 'organizery',
+        variants: [{
+          id: 'gid://shopify/ProductVariant/11',
+          title: 'Default Title',
+          price: 49.9,
+          currency: 'PLN',
+          available: true,
+          options: [{ name: 'Title', value: 'Default Title' }]
+        }]
+      }
+    });
+    assert.doesNotMatch(response.body, /inventory|vendor|tags|status|DRAFT/i);
+
+    // The handle goes to Shopify as a variable of the single-product query.
+    assert.equal(requests.length, 1);
+    assert.match(requests[0].query, /productByIdentifier\(identifier: \{ handle: \$handle \}\)/);
+    assert.deepEqual(requests[0].variables, { handle: 'travel-organizer' });
+  });
+});
+
+test('product detail answers 404 for products outside the public Giovetta catalog', async () => {
+  const cases = [
+    'missing-product',      // Shopify has no such product
+    'draft-organizer',      // DRAFT
+    'foreign-organizer',    // wrong vendor
+    'untagged-organizer',   // missing required tag
+    'sold-out-organizer',   // requireAvailable
+    'car-lifestyle-thing'   // not classified into the Giovetta taxonomy
+  ];
+
+  await withFakeShopify(productDetailShopify(DETAIL_PRODUCTS), async (requests) => {
+    for (const handle of cases) {
+      const response = await app.inject({ method: 'GET', url: `/catalog/products/${handle}` });
+
+      assert.equal(response.statusCode, 404, handle);
+      assert.deepEqual(response.json(), { ok: false, error: 'Produkt nie istnieje' }, handle);
+      assert.doesNotMatch(response.body, /Snowboard|Car Lifestyle|DRAFT/, handle);
+    }
+
+    assert.deepEqual(requests.map((request) => request.variables.handle), cases);
+  });
+});
+
+test('product detail rejects invalid handles with 400 before calling Shopify', async () => {
+  const invalidHandles = [
+    'Travel-Organizer',
+    'travel%20organizer',
+    'travel--organizer',
+    '-travel',
+    'travel"organizer',
+    encodeURIComponent('x" } }) { shop { name } } #')
+  ];
+
+  await withFakeShopify(productDetailShopify(DETAIL_PRODUCTS), async (requests) => {
+    for (const handle of invalidHandles) {
+      const response = await app.inject({ method: 'GET', url: `/catalog/products/${handle}` });
+
+      assert.equal(response.statusCode, 400, handle.slice(0, 40));
+      assert.deepEqual(response.json(), { ok: false, error: 'Nieprawidłowy identyfikator produktu' });
+    }
+
+    // Fastify's default maxParamLength (100) rejects longer handles with 414 before the route runs.
+    const tooLong = await app.inject({ method: 'GET', url: `/catalog/products/${'a'.repeat(101)}` });
+    assert.equal(tooLong.statusCode, 414);
+
+    assert.equal(requests.length, 0);
+  });
+});
+
+test('product detail reports Shopify failures as a generic 502 without any details', async () => {
+  const failures = [
+    () => new Response(JSON.stringify({ errors: [{ message: 'internal-graphql-detail' }] }), { status: 200 }),
+    () => new Response('internal-http-detail', { status: 500 })
+  ];
+
+  for (const failure of failures) {
+    await withFakeShopify(failure, async () => {
+      const response = await app.inject({ method: 'GET', url: '/catalog/products/travel-organizer' });
+
+      assert.equal(response.statusCode, 502);
+      assert.deepEqual(response.json(), PRODUCT_DETAIL_ERROR);
+      assert.doesNotMatch(response.body, /internal-|GraphQL|HTTP|catalog-test-secret|fake-token/);
+    });
+  }
 });
 
 // --- Storefront cart --------------------------------------------------------------

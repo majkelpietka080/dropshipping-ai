@@ -15,6 +15,7 @@ export const PUBLIC_ROUTES = new Set([
   'GET /shopify/products',
   'GET /catalog/coverage',
   'GET /catalog/products',
+  'GET /catalog/products/:handle',
   'POST /storefront/cart',
   'GET /stores/:slug/config',
   'GET /store/config'

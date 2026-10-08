@@ -17,10 +17,9 @@ const CURSOR_PATTERN = /^[A-Za-z0-9+/=_-]{1,512}$/;
 // status:active is filtered by Shopify so pagination only walks active products.
 export const CATALOG_PRODUCTS_SEARCH = 'status:active';
 
-export const CATALOG_PRODUCTS_QUERY = `
-  query catalogProducts($first: Int!, $after: String, $query: String) {
-    products(first: $first, after: $after, query: $query) {
-      nodes {
+// Fields of one product node, shared by the list and the single-product query
+// so both endpoints expose exactly the same public product.
+const CATALOG_PRODUCT_FIELDS = `
         id
         handle
         title
@@ -51,12 +50,25 @@ export const CATALOG_PRODUCTS_QUERY = `
               value
             }
           }
-        }
+        }`;
+
+export const CATALOG_PRODUCTS_QUERY = `
+  query catalogProducts($first: Int!, $after: String, $query: String) {
+    products(first: $first, after: $after, query: $query) {
+      nodes {${CATALOG_PRODUCT_FIELDS}
       }
       pageInfo {
         hasNextPage
         endCursor
       }
+    }
+  }
+`;
+
+// The handle is passed as a GraphQL variable, never interpolated into a search string.
+export const CATALOG_PRODUCT_QUERY = `
+  query catalogProduct($handle: String!) {
+    productByIdentifier(identifier: { handle: $handle }) {${CATALOG_PRODUCT_FIELDS}
     }
   }
 `;
@@ -87,6 +99,10 @@ export type ShopifyCatalogPage = {
     nodes: ShopifyCatalogNode[];
     pageInfo: { hasNextPage: boolean; endCursor: string | null };
   };
+};
+
+export type ShopifyCatalogProductResult = {
+  productByIdentifier: ShopifyCatalogNode | null;
 };
 
 // Variant data needed to pick a size/colour and add it to a cart; no inventory.
@@ -144,6 +160,18 @@ export function parseCatalogPageParams(
   }
 
   return { ok: true, first, after: query.after };
+}
+
+// Shopify handles: lowercase letters, digits, single '-' or '_' separators.
+const HANDLE_PATTERN = /^[a-z0-9]+(?:[-_][a-z0-9]+)*$/;
+const MAX_HANDLE_LENGTH = 255;
+
+export function parseCatalogHandle(value: unknown): { ok: true; handle: string } | { ok: false; error: string } {
+  if (typeof value !== 'string' || value.length > MAX_HANDLE_LENGTH || !HANDLE_PATTERN.test(value)) {
+    return { ok: false, error: 'Nieprawidłowy identyfikator produktu' };
+  }
+
+  return { ok: true, handle: value };
 }
 
 function isAvailable(node: ShopifyCatalogNode): boolean {
@@ -225,6 +253,25 @@ function toPublicProduct(node: ShopifyCatalogNode, taxonomy: CatalogTaxonomy): C
 
 export function toCatalogProduct(node: ShopifyCatalogNode, store: StoreConfig): CatalogProduct {
   return toPublicProduct(node, buildCatalogTaxonomy(store));
+}
+
+// Single public product: same filters and classification as the list; anything
+// outside the public Giovetta catalog is null (the route answers 404).
+export function toCatalogProductDetail(
+  node: ShopifyCatalogNode | null,
+  store: StoreConfig
+): CatalogProduct | null {
+  if (!node || !matchesCatalogFilters(node, store)) {
+    return null;
+  }
+
+  const taxonomy = buildCatalogTaxonomy(store);
+
+  if (classifyProductType(node.productType, taxonomy).matchedBy === 'none') {
+    return null;
+  }
+
+  return toPublicProduct(node, taxonomy);
 }
 
 // Filtering happens after Shopify paginates, so a page can hold fewer than

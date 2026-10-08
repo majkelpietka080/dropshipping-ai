@@ -5,11 +5,15 @@ import { loadStoreConfig } from '../store-files.js';
 import { getShopifyConfig } from '../shopify-config.js';
 import { sendStoreConfigError } from '../http-helpers.js';
 import {
+  CATALOG_PRODUCT_QUERY,
   CATALOG_PRODUCTS_QUERY,
   CATALOG_PRODUCTS_SEARCH,
+  parseCatalogHandle,
   parseCatalogPageParams,
   toCatalogPage,
-  type ShopifyCatalogPage
+  toCatalogProductDetail,
+  type ShopifyCatalogPage,
+  type ShopifyCatalogProductResult
 } from '../catalog-model.js';
 
 export type CatalogRouteDependencies = {
@@ -135,5 +139,50 @@ export function registerCatalogRoutes(
     }
 
     return { ok: true, ...toCatalogPage(data, store) };
+  });
+
+  // Public product detail: one active, classified Giovetta product by handle.
+  app.get('/catalog/products/:handle', async (request, reply) => {
+    const params = parseCatalogHandle((request.params as { handle?: unknown }).handle);
+
+    if (!params.ok) {
+      return reply.code(400).send({ ok: false, error: params.error });
+    }
+
+    let store: Awaited<ReturnType<typeof loadStoreConfig>>;
+
+    try {
+      store = await loadStoreConfig(defaultStoreSlug);
+    } catch (error) {
+      return sendStoreConfigError(request, reply, error, 'Nie udało się wczytać konfiguracji sklepu');
+    }
+
+    const config = getShopifyConfig();
+
+    if (!config) {
+      return reply.code(503).send({ ok: false, error: 'Brakuje konfiguracji Shopify w .env' });
+    }
+
+    const { createShopifyClient } = await import('@dropshipping/shopify');
+
+    let data: ShopifyCatalogProductResult;
+
+    try {
+      data = await createShopifyClient(config).query<ShopifyCatalogProductResult>(CATALOG_PRODUCT_QUERY, {
+        handle: params.handle
+      });
+    } catch (error) {
+      // Public endpoint: Shopify/GraphQL details stay in the server log only.
+      request.log.error(error);
+      return reply.code(502).send({ ok: false, error: 'Nie udało się pobrać produktu.' });
+    }
+
+    const product = toCatalogProductDetail(data.productByIdentifier, store);
+
+    if (!product) {
+      return reply.code(404).send({ ok: false, error: 'Produkt nie istnieje' });
+    }
+
+    return { ok: true, product };
   });
 }
