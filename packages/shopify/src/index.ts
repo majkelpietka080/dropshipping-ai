@@ -362,3 +362,6 @@ export function createShopifyClient(config: ShopifyConfig) {
     }
   };
 }
+
+export { createShopifyCart } from './storefront.js';
+export type { ShopifyStorefrontConfig, StorefrontCartLine, StorefrontCartResult } from './storefront.js';

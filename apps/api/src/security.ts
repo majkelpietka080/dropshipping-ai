@@ -15,6 +15,7 @@ export const PUBLIC_ROUTES = new Set([
   'GET /shopify/products',
   'GET /catalog/coverage',
   'GET /catalog/products',
+  'POST /storefront/cart',
   'GET /stores/:slug/config',
   'GET /store/config'
 ]);
@@ -125,6 +126,7 @@ const SECRET_ENV_KEYS = [
   'ANTHROPIC_API_KEY',
   'SHOPIFY_CLIENT_SECRET',
   'SHOPIFY_ACCESS_TOKEN',
+  'SHOPIFY_STOREFRONT_ACCESS_TOKEN',
   'APPROVAL_SECRET',
   'ALLEGRO_CLIENT_SECRET',
   'BIGBUY_API_KEY',

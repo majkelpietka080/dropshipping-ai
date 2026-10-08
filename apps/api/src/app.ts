@@ -23,6 +23,7 @@ import { registerStoreConfigRoutes } from './routes/store-config.js';
 import { registerAllegroRoutes } from './routes/allegro.js';
 import { registerShopifyRoutes } from './routes/shopify.js';
 import { registerCatalogRoutes } from './routes/catalog.js';
+import { registerStorefrontRoutes } from './routes/storefront.js';
 import { registerSupplierRoutes } from './routes/suppliers.js';
 import { registerStoreProposalRoutes } from './routes/store-proposals.js';
 import { registerProductProposalRoutes } from './routes/product-proposals.js';
@@ -87,6 +88,7 @@ registerAiRoutes(app);
 registerShopifyRoutes(app, { defaultStoreSlug: DEFAULT_STORE_SLUG });
 
 registerCatalogRoutes(app, { defaultStoreSlug: DEFAULT_STORE_SLUG });
+registerStorefrontRoutes(app);
 
 const storeProposals = new Map<string, StoreProposal>(
   (await loadJsonArray<StoreProposal>('store-proposals.json')).map((item) => [item.id, item])
