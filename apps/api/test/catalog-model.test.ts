@@ -9,11 +9,23 @@ import {
   resolveCategory,
   toCatalogPage,
   toCatalogProduct,
-  type ShopifyCatalogNode
+  type ShopifyCatalogNode,
+  type ShopifyCatalogVariant
 } from '../src/catalog-model.js';
 import { loadStoreConfig } from '../src/store-files.js';
 
 const giovetta = await loadStoreConfig('giovetta-living');
+
+function variant(overrides: Partial<ShopifyCatalogVariant> = {}): ShopifyCatalogVariant {
+  return {
+    id: 'gid://shopify/ProductVariant/11',
+    title: 'Czarny / M',
+    price: '49.90',
+    availableForSale: true,
+    selectedOptions: [{ name: 'Kolor', value: 'Czarny' }, { name: 'Rozmiar', value: 'M' }],
+    ...overrides
+  };
+}
 
 function node(overrides: Partial<ShopifyCatalogNode> = {}): ShopifyCatalogNode {
   return {
@@ -26,7 +38,12 @@ function node(overrides: Partial<ShopifyCatalogNode> = {}): ShopifyCatalogNode {
     tags: ['giovetta', 'internal-note'],
     images: { nodes: [{ url: 'https://cdn.example/1.jpg', altText: 'Organizer' }] },
     priceRange: { minVariantPrice: { amount: '49.90', currencyCode: 'PLN' } },
-    variants: { nodes: [{ availableForSale: false }, { availableForSale: true }] },
+    variants: {
+      nodes: [
+        variant({ id: 'gid://shopify/ProductVariant/10', title: 'Czarny / S', price: '49.90', availableForSale: false, selectedOptions: [{ name: 'Kolor', value: 'Czarny' }, { name: 'Rozmiar', value: 'S' }] }),
+        variant({ price: '54.90' })
+      ]
+    },
     ...overrides
   };
 }
@@ -45,7 +62,7 @@ test('catalog filters match the store config like /shopify/products', () => {
   assert.equal(matchesCatalogFilters(node({ tags: ['other'] }), giovetta), false);
   assert.equal(matchesCatalogFilters(node({ tags: ['GIOVETTA'] }), giovetta), true);
   assert.equal(
-    matchesCatalogFilters(node({ variants: { nodes: [{ availableForSale: false }] } }), giovetta),
+    matchesCatalogFilters(node({ variants: { nodes: [variant({ availableForSale: false })] } }), giovetta),
     false
   );
 });
@@ -70,7 +87,7 @@ test('public product exposes only the allowed fields', () => {
   const product = toCatalogProduct(node(), giovetta);
 
   assert.deepEqual(Object.keys(product).sort(), [
-    'available', 'category', 'categorySlug', 'currency', 'handle', 'id', 'images', 'price', 'subcategory', 'subcategorySlug', 'title'
+    'available', 'category', 'categorySlug', 'currency', 'handle', 'id', 'images', 'price', 'subcategory', 'subcategorySlug', 'title', 'variants'
   ]);
   assert.deepEqual(product, {
     id: 'gid://shopify/Product/1',
@@ -83,8 +100,30 @@ test('public product exposes only the allowed fields', () => {
     category: 'Travel & Organization',
     subcategory: 'Organizery',
     categorySlug: 'travel-organization',
-    subcategorySlug: 'organizery'
+    subcategorySlug: 'organizery',
+    variants: [
+      {
+        id: 'gid://shopify/ProductVariant/10',
+        title: 'Czarny / S',
+        price: 49.9,
+        currency: 'PLN',
+        available: false,
+        options: [{ name: 'Kolor', value: 'Czarny' }, { name: 'Rozmiar', value: 'S' }]
+      },
+      {
+        id: 'gid://shopify/ProductVariant/11',
+        title: 'Czarny / M',
+        price: 54.9,
+        currency: 'PLN',
+        available: true,
+        options: [{ name: 'Kolor', value: 'Czarny' }, { name: 'Rozmiar', value: 'M' }]
+      }
+    ]
   });
+
+  for (const item of product.variants) {
+    assert.deepEqual(Object.keys(item).sort(), ['available', 'currency', 'id', 'options', 'price', 'title']);
+  }
 
   const categoryOnly = toCatalogProduct(node({ productType: 'Travel & Organization' }), giovetta);
   assert.equal(categoryOnly.category, 'Travel & Organization');
@@ -138,4 +177,12 @@ test('the Shopify query filters ACTIVE products and paginates with first/after',
   assert.match(CATALOG_PRODUCTS_QUERY, /products\(first: \$first, after: \$after, query: \$query\)/);
   assert.match(CATALOG_PRODUCTS_QUERY, /endCursor/);
   assert.doesNotMatch(CATALOG_PRODUCTS_QUERY, /inventory|totalInventory/i);
+  assert.match(CATALOG_PRODUCTS_QUERY, /variants\(first: 50\)[\s\S]*selectedOptions/);
+});
+
+test('a product without variants exposes an empty list and is not available', () => {
+  const product = toCatalogProduct(node({ variants: { nodes: [] } }), giovetta);
+
+  assert.deepEqual(product.variants, []);
+  assert.equal(product.available, false);
 });

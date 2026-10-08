@@ -42,7 +42,14 @@ export const CATALOG_PRODUCTS_QUERY = `
         }
         variants(first: 50) {
           nodes {
+            id
+            title
+            price
             availableForSale
+            selectedOptions {
+              name
+              value
+            }
           }
         }
       }
@@ -64,7 +71,15 @@ export type ShopifyCatalogNode = {
   tags: string[];
   images: { nodes: Array<{ url: string; altText: string | null }> };
   priceRange: { minVariantPrice: { amount: string; currencyCode: string } };
-  variants: { nodes: Array<{ availableForSale: boolean }> };
+  variants: { nodes: ShopifyCatalogVariant[] };
+};
+
+export type ShopifyCatalogVariant = {
+  id: string;
+  title: string;
+  price: string;
+  availableForSale: boolean;
+  selectedOptions: Array<{ name: string; value: string }>;
 };
 
 export type ShopifyCatalogPage = {
@@ -72,6 +87,16 @@ export type ShopifyCatalogPage = {
     nodes: ShopifyCatalogNode[];
     pageInfo: { hasNextPage: boolean; endCursor: string | null };
   };
+};
+
+// Variant data needed to pick a size/colour and add it to a cart; no inventory.
+export type CatalogVariant = {
+  id: string;
+  title: string;
+  price: number;
+  currency: string;
+  available: boolean;
+  options: Array<{ name: string; value: string }>;
 };
 
 export type CatalogProduct = {
@@ -87,6 +112,7 @@ export type CatalogProduct = {
   // Catalog/filter/URL identifiers derived from the store config; never written to Shopify.
   categorySlug: string | null;
   subcategorySlug: string | null;
+  variants: CatalogVariant[];
 };
 
 export type CatalogPage = {
@@ -184,7 +210,16 @@ function toPublicProduct(node: ShopifyCatalogNode, taxonomy: CatalogTaxonomy): C
     category: classification.category,
     subcategory: classification.subcategory,
     categorySlug: classification.categorySlug,
-    subcategorySlug: classification.subcategorySlug
+    subcategorySlug: classification.subcategorySlug,
+    variants: node.variants.nodes.map((variant) => ({
+      id: variant.id,
+      title: variant.title,
+      price: Number(variant.price),
+      // Shopify prices every variant in the shop currency, same as priceRange.
+      currency: node.priceRange.minVariantPrice.currencyCode,
+      available: variant.availableForSale,
+      options: variant.selectedOptions.map(({ name, value }) => ({ name, value }))
+    }))
   };
 }
 

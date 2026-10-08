@@ -406,7 +406,15 @@ function catalogNode(overrides: Record<string, unknown>) {
     tags: ['giovetta'],
     images: { nodes: [{ url: 'https://cdn.example/1.jpg', altText: null }] },
     priceRange: { minVariantPrice: { amount: '49.90', currencyCode: 'PLN' } },
-    variants: { nodes: [{ availableForSale: true }] },
+    variants: {
+      nodes: [{
+        id: 'gid://shopify/ProductVariant/11',
+        title: 'Default Title',
+        price: '49.90',
+        availableForSale: true,
+        selectedOptions: [{ name: 'Title', value: 'Default Title' }]
+      }]
+    },
     ...overrides
   };
 }
@@ -479,7 +487,15 @@ test('public catalog returns only active Giovetta products with public fields an
         category: 'Travel & Organization',
         subcategory: 'Organizery',
         categorySlug: 'travel-organization',
-        subcategorySlug: 'organizery'
+        subcategorySlug: 'organizery',
+        variants: [{
+          id: 'gid://shopify/ProductVariant/11',
+          title: 'Default Title',
+          price: 49.9,
+          currency: 'PLN',
+          available: true,
+          options: [{ name: 'Title', value: 'Default Title' }]
+        }]
       }]);
       assert.doesNotMatch(response.body, /inventory|vendor|tags|status|DRAFT/i);
 
