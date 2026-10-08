@@ -69,6 +69,7 @@ Object.assign(process.env, {
   SHOPIFY_CLIENT_ID: '',
   SHOPIFY_CLIENT_SECRET: '',
   SHOPIFY_ACCESS_TOKEN: '',
+  SHOPIFY_STOREFRONT_ACCESS_TOKEN: '',
   ANTHROPIC_API_KEY: '',
   BIGBUY_API_KEY: '',
   ALLEGRO_CLIENT_ID: 'test-client-id',
@@ -105,7 +106,8 @@ const PUBLIC_ROUTES = [
   'GET /health',
   'GET /shopify/products',
   'GET /store/config',
-  'GET /stores/:slug/config'
+  'GET /stores/:slug/config',
+  'POST /storefront/cart'
 ];
 
 const PROTECTED_ROUTES = [
@@ -164,9 +166,9 @@ function setCookieHeader(value: string | string[] | number | undefined): string 
 
 // --- Route inventory and auth ---------------------------------------------------
 
-test('all 28 routes are registered', () => {
+test('all 29 routes are registered', () => {
   assert.deepEqual(registeredRoutes(), [...PUBLIC_ROUTES, ...PROTECTED_ROUTES].sort());
-  assert.equal(registeredRoutes().length, 28);
+  assert.equal(registeredRoutes().length, 29);
 });
 
 test('every non-public route rejects requests without a valid token', async () => {
@@ -576,6 +578,140 @@ test('catalog coverage uses the shared classification and reports unclassified p
       assert.deepEqual(rawProducts.map((product: { productType: string }) => product.productType), edges.map((edge) => edge.node.productType));
       assert.ok(rawProducts.every((product: Record<string, unknown>) => !('categorySlug' in product) && !('category' in product)));
       assert.ok(rawProducts.every((product: { totalInventory?: number }) => product.totalInventory === 1));
+    }
+  );
+});
+
+// --- Storefront cart --------------------------------------------------------------
+
+const STOREFRONT_ENV = {
+  SHOPIFY_SHOP_DOMAIN: 'cart-test-shop',
+  SHOPIFY_STOREFRONT_ACCESS_TOKEN: 'cart-test-storefront-token'
+};
+
+const VALID_CART_LINES = [{ merchandiseId: 'gid://shopify/ProductVariant/11', quantity: 2 }];
+const CART_ERROR = { ok: false, error: 'Nie udało się utworzyć koszyka Shopify.' };
+
+type StorefrontRequest = { url: string; token: string | null; body: { query: string; variables: Record<string, unknown> } };
+
+// Serves the Storefront API GraphQL endpoint from memory; nothing leaves the process.
+async function withFakeStorefront(
+  respond: () => Response,
+  run: (requests: StorefrontRequest[]) => Promise<void>
+) {
+  const blockedFetch = globalThis.fetch;
+  const previousEnv = Object.fromEntries(Object.keys(STOREFRONT_ENV).map((key) => [key, process.env[key]]));
+  const requests: StorefrontRequest[] = [];
+
+  Object.assign(process.env, STOREFRONT_ENV);
+  globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    const url = String(input);
+
+    if (url.startsWith(`https://${STOREFRONT_ENV.SHOPIFY_SHOP_DOMAIN}.myshopify.com/api/`)) {
+      requests.push({
+        url,
+        token: new Headers(init?.headers).get('X-Shopify-Storefront-Access-Token'),
+        body: JSON.parse(String(init?.body))
+      });
+      return respond();
+    }
+
+    throw new Error(`Unexpected request in test: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    await run(requests);
+  } finally {
+    globalThis.fetch = blockedFetch;
+    Object.assign(process.env, previousEnv);
+  }
+}
+
+test('storefront cart rejects invalid lines with 400 before calling Shopify', async () => {
+  const invalidBodies: unknown[] = [
+    {},
+    { lines: [] },
+    { lines: 'not-an-array' },
+    { lines: Array.from({ length: 101 }, () => VALID_CART_LINES[0]) },
+    { lines: ['not-an-object'] },
+    { lines: [{ merchandiseId: '123', quantity: 1 }] },
+    { lines: [{ merchandiseId: 'gid://shopify/Product/1', quantity: 1 }] },
+    { lines: [{ merchandiseId: 'gid://shopify/ProductVariant/11', quantity: 0 }] },
+    { lines: [{ merchandiseId: 'gid://shopify/ProductVariant/11', quantity: 1.5 }] },
+    { lines: [{ merchandiseId: 'gid://shopify/ProductVariant/11', quantity: 100 }] },
+    { lines: [{ merchandiseId: 'gid://shopify/ProductVariant/11', quantity: '2' }] }
+  ];
+
+  await withFakeStorefront(
+    () => new Response(JSON.stringify({}), { status: 200 }),
+    async (requests) => {
+      for (const payload of invalidBodies) {
+        const response = await app.inject({ method: 'POST', url: '/storefront/cart', payload: payload as Record<string, unknown> });
+
+        assert.equal(response.statusCode, 400, JSON.stringify(payload).slice(0, 80));
+        assert.equal(response.json().ok, false);
+        assert.equal(typeof response.json().error, 'string');
+      }
+
+      assert.equal(requests.length, 0);
+    }
+  );
+});
+
+test('storefront cart responds 503 without Storefront API configuration', async () => {
+  const response = await app.inject({ method: 'POST', url: '/storefront/cart', payload: { lines: VALID_CART_LINES } });
+
+  assert.equal(response.statusCode, 503);
+  assert.deepEqual(response.json(), { ok: false, error: 'Brakuje konfiguracji Shopify Storefront API w .env' });
+});
+
+test('storefront cart reports Shopify failures as a generic 502 without any details', async () => {
+  const failures = [
+    () => new Response(JSON.stringify({ errors: [{ message: 'internal-graphql-detail' }] }), { status: 200 }),
+    () => new Response(JSON.stringify({
+      data: { cartCreate: { cart: null, userErrors: [{ field: ['lines'], message: 'internal-user-error-detail', code: 'INVALID' }] } }
+    }), { status: 200 }),
+    () => new Response(JSON.stringify({ data: { cartCreate: { cart: { id: 'gid://shopify/Cart/1' }, userErrors: [] } } }), { status: 200 }),
+    () => new Response('internal-http-detail', { status: 500 })
+  ];
+
+  for (const failure of failures) {
+    await withFakeStorefront(failure, async () => {
+      const response = await app.inject({ method: 'POST', url: '/storefront/cart', payload: { lines: VALID_CART_LINES } });
+
+      assert.equal(response.statusCode, 502);
+      assert.deepEqual(response.json(), CART_ERROR);
+      assert.doesNotMatch(response.body, /internal-|GraphQL|HTTP|cart-test-storefront-token|userErrors/);
+    });
+  }
+});
+
+test('storefront cart creates a Shopify cart and returns the checkout URL', async () => {
+  await withFakeStorefront(
+    () => new Response(JSON.stringify({
+      data: {
+        cartCreate: {
+          cart: { id: 'gid://shopify/Cart/abc123', checkoutUrl: 'https://cart-test-shop.myshopify.com/cart/c/abc123' },
+          userErrors: [],
+          warnings: []
+        }
+      }
+    }), { status: 200 }),
+    async (requests) => {
+      const response = await app.inject({ method: 'POST', url: '/storefront/cart', payload: { lines: VALID_CART_LINES } });
+
+      assert.equal(response.statusCode, 200);
+      assert.deepEqual(response.json(), {
+        ok: true,
+        cartId: 'gid://shopify/Cart/abc123',
+        checkoutUrl: 'https://cart-test-shop.myshopify.com/cart/c/abc123'
+      });
+
+      assert.equal(requests.length, 1);
+      assert.match(requests[0].url, /^https:\/\/cart-test-shop\.myshopify\.com\/api\/[^/]+\/graphql\.json$/);
+      assert.equal(requests[0].token, 'cart-test-storefront-token');
+      assert.match(requests[0].body.query, /cartCreate/);
+      assert.deepEqual(requests[0].body.variables, { input: { lines: VALID_CART_LINES } });
     }
   );
 });
