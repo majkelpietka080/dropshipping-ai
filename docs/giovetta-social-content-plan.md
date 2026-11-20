@@ -46,7 +46,7 @@ Przygotować Giovettę jako wirtualną ambasadorkę Giovetta Living. W materiał
 7. Do premiery CTA ma budować zainteresowanie, a nie kierować do nieotwartego sklepu.
 
 ## 5. Harmonogram komunikacji i formaty
-- Do dnia poprzedzającego otwarcie: każda publikacja kończy się odliczaniem do potwierdzonej daty otwarcia oraz zachętą do komentarza „SKLEP”.
+- Tymczasowa data otwarcia przyjęta na potrzeby planu: 1.12.2026. Do czasu zmiany tej decyzji odliczanie i CTA odnoszą się do 1 grudnia; jeśli termin się zmieni, Michał przekaże nową datę i aktualizujemy komunikację.
 - Po otwarciu: komunikat „sklep już otwarty, link w bio”.
 - Instagram: plan dzienny — post/karuzela lub rolka.
 - TikTok: 3–4 filmy tygodniowo.
@@ -101,7 +101,7 @@ Przygotować Giovettę jako wirtualną ambasadorkę Giovetta Living. W materiał
 6. Po premierze rozpocząć przygotowanie kampanii płatnych: najpierw Meta (IG+FB), następnie TikTok.
 
 ## 9. Kwestie do potwierdzenia — nie zakładać odpowiedzi
-- Data otwarcia: przekazanie Claude z 20.11.2026 podaje 1.12.2026. Wcześniejsze ustalenia w rozmowie z ChatGPT wskazywały około 5.12.2026. Do czasu potwierdzenia przez Michała nie używać konkretnego X w odliczaniu ani nie ogłaszać daty jako ostatecznej.
+- Data otwarcia: Michał zdecydował tymczasowo przyjąć 1.12.2026. Jest to robocza data do planowania odliczania i publikacji; może zostać później zmieniona. Nie przedstawiać jej jako nieodwołalnej gwarancji.
 - TikTok/Metricool: status konta i integracji traktować jako stan z 20.11.2026; sprawdzić ponownie przed planowaniem.
 - Produkty i ceny: przykłady z przekazania nie zastępują odczytu bieżącego Shopify.
 
