@@ -91,3 +91,27 @@ If the status change, payment and checkout blockers remain unresolved, launch by
 - Operations: https://app.notion.com/p/40d241ec5e7381d0911eee9f691928c8
 - P0 Shopify status audit: https://app.notion.com/p/421241ec5e738116b8d6ed4da5d13a88
 - P0 payments/checkout confirmation: https://app.notion.com/p/421241ec5e73816c9775d3bd8ee9623c
+
+
+## Merlitz — new Travel & Organization revalidation
+
+Merlitz was upgraded from Proposal to CONDITIONAL after checking the official supplier pages. It is a Polish direct wholesaler/distributor with single-order dropshipping for travel accessories, luggage and bags.
+
+- Dropship orders are submitted by email or online. Merlitz packs and dispatches within 48 hours via parcel locker or DPD, then emails the store after dispatch.
+- The XML feed is free and includes images, descriptions, product codes, dimensions and prices; automatic updates are daily. No native Shopify/BaseLinker order automation was confirmed.
+- Standard domestic GLS shipping is 13 PLN net prepaid/credit or 15 PLN net COD, with 24-hour transit after dispatch. The supplier does not confirm that these rates apply to dropshipping; the dropship page separately lists parcel locker/DPD without a price table.
+- Retail terms provide a 14-day consumer withdrawal period with return shipping paid by the consumer. B2B partner handling of end-customer returns is not confirmed.
+- Prices are shown net. Seller entity in terms: MODESTE sp. z o.o. sp.k., NIP 9662108681. VAT invoice treatment and active-business requirements need confirmation.
+
+### Product candidate: Solier FL28 LUSSO BLACK
+
+- Supplier catalog: 83.33 PLN net; a catalog snapshot from a few days earlier showed 4 units. Recheck stock before any import.
+- Solier official store reference: 299 PLN gross, but the product page showed temporarily unavailable. Authorized Solier store on Allegro showed 319 PLN gross.
+- Product: natural leather, made in Poland, 5-year guarantee, black non-woven protective bag. EAN 5900718532983.
+- Scenario only: assuming 23% non-recoverable VAT, 83.33 PLN net product cost, 13 PLN net GLS shipping (not confirmed for dropship), 19.99 PLN customer shipping, 1.95% payment fee and 1.20 PLN/order, total product + shipping cost is about 118.49 PLN gross. The product price needed for 30% margin is about 155.89 PLN. At a scenario price of 279 PLN, margin is about 58.0% and profit 173.47 PLN/order; at 299 PLN, margin is about 60.5% and profit 193.08 PLN/order.
+- These are not final margin figures. Partner price, dropshipping shipping rate, VAT invoice and live stock remain unconfirmed. Product status remains HOLD.
+- F34 Bianca (Merlitz 83.33 PLN net vs Solier 69 PLN gross) and F33 Livia (83.33 PLN net vs Solier 75 PLN gross) are not selected at public catalog price; a substantial partner discount would be required.
+
+Official sources: https://merlitz.eu/pol_m_Uslugi_Dropshipping-hurtownia-Merlitz-830.html ; https://merlitz.eu/Integracja-sklepu-z-hurtownia-cabout-pol-61.html ; https://merlitz.eu/Koszty-transportu-cabout-pol-75.html ; https://merlitz.eu/Regulamin-cterms-pol-145.html ; https://solier.pl/product-pol-57688-Duza-skorzana-torba-shopper-damska-FL28-Lusso-czarna.html ; https://allegro.pl/produkt/solier-torebka-shopper-skora-naturalna-czarny-bafbee9a-bc10-4659-9e2e-a24f0df97310
+
+Notion product candidate: https://app.notion.com/p/421241ec5e73815095c5c00d40487cdb
