@@ -20,7 +20,7 @@
 ### Multistore / ECOTOYS — PROPOSAL (direct wholesaler)
 - Brands ModernHome, MultiGarden, KADEN, ECOTOYS, Petsi; home, garden, small appliances, kitchen, furniture, travel/outdoor.
 - XML/CSV feed with prices, SRP, stocks, descriptions and images. Integration to Shopify/BaseLinker not confirmed.
-- Dropship shipping: PLN 15.99–18.99, 1–2 days; own label PLN 3.99; dispatch same day for paid orders before 13:30.
+- Dropship shipping: Poczta Polska PLN 15.99 (2–3 days); InPost/Paczkomat/UPS PLN 17.99 (1–2 days); DPD PLN 18.99 (1–2 days); own label PLN 3.99; dispatch same day for paid orders before 13:30.
 - XML/VIP subscriptions shown on official page; price and whether required unknown. Returns/neutral packing and VAT requirements not verified.
 - Official: https://www.hurtowniamultistore.pl/wspolpraca-hurtowa-dla-firm,p22.html ; https://www.hurtowniamultistore.pl/koszty-dostawy,p26.html ; https://www.hurtowniamultistore.pl/integracje,c152.html
 
