@@ -10,9 +10,11 @@
 
 ## New supplier research
 ### Sellteo — CONDITIONAL (multi-category platform/aggregator)
-- 100k+ products; XML full catalogue and stock/prices; no subscription, minimum or fee for account/feed; 2% standard wholesale discount.
-- Dropshipping single orders, neutral packaging; shipping from PLN 11.99; InPost free for merchandise >= PLN 199; own label packaging PLN 1.99; >30kg PLN 40; dispatch same day if paid by 10:00.
-- Important returns risk: B2B no return without cause; consumer returns require individual prior agreement; no automatic return handling. Shopify native integration/tracking sync not confirmed.
+- 100k+ products; no subscription/minimum/account/feed fees; standard wholesale discount 2%; neutral carton.
+- Full products.xml refresh daily; stany.xml refresh every 10 minutes. BaseLinker-compatible; native Shopify integration not confirmed.
+- Poland-only fulfilment. Shipping: Orlen Paczka PLN 11.99; DPD Pickup PLN 13.99; Paczkomat InPost PLN 16.99; InPost courier PLN 19.90 (free from PLN 199 merchandise value); DPD courier PLN 19.90; GLS PLN 25.99; >30kg PLN 40. Own label: PLN 1.99 packaging. Dispatch same day if paid by 10:00.
+- Tracking number sent to store by email only; no Shopify tracking sync confirmed.
+- Important returns risk: B2B no return without cause; consumer returns require individual prior agreement; no automatic return handling.
 - Official: https://b2b.sellteo.pl/dropshipping.html ; https://b2b.sellteo.pl/regulamin-hurtowy.html
 
 ### Multistore / ECOTOYS — PROPOSAL (direct wholesaler)
